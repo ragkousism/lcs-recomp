@@ -181,6 +181,12 @@ struct VulkanState {
     std::uint64_t frame_epoch{1u};
     bool pass_open{};
     Target *current_target{};
+    // Previous submit still owns the command buffer, geometry, and readback.
+    bool submit_pending{};
+    bool pending_readback{};
+    std::size_t pending_readback_bytes{};
+    // Copied pixels the present finish has not shown yet.
+    bool readback_latched{};
 };
 
 VulkanState &state() {
@@ -1078,6 +1084,10 @@ void destroy_backend(VulkanState &s) noexcept {
         if (staging.memory) vkFreeMemory(s.device, staging.memory, nullptr);
     }
     s.staging.clear();
+    s.submit_pending = false;
+    s.pending_readback = false;
+    s.pending_readback_bytes = 0u;
+    s.readback_latched = false;
     for (auto &entry : s.targets) destroy_target(s, entry.second);
     s.targets.clear();
     for (auto &entry : s.textures) destroy_image(s, entry.second.gpu);
@@ -1562,7 +1572,7 @@ bool create_backend(VulkanState &s, std::string &error) {
     if (!write_descriptor(s, s.white.gpu, error)) return false;
     s.report.transfer_self_test_passed = true;
     if (!run_offscreen_self_test(s, error)) return false;
-    s.report.frames_in_flight_capacity = 1u;
+    s.report.frames_in_flight_capacity = 2u;
     s.vertices.reserve(1u << 16u);
     return true;
 }
@@ -1948,15 +1958,58 @@ void log_frame_failure(const VulkanState &s, const char *step, VkResult result) 
               << " display_fb=" << std::hex << s.display_framebuffer << std::dec << '\n';
 }
 
+void release_staging(VulkanState &s) noexcept {
+    for (Staging &staging : s.staging) {
+        vkDestroyBuffer(s.device, staging.buffer, nullptr);
+        vkFreeMemory(s.device, staging.memory, nullptr);
+    }
+    s.staging.clear();
+}
+
+bool complete_pending_submit(VulkanState &s, bool &copied) noexcept {
+    copied = false;
+    if (!s.submit_pending) return true;
+    const VkResult waited = vkQueueWaitIdle(s.queue);
+    if (waited != VK_SUCCESS) {
+        log_frame_failure(s, "vkQueueWaitIdle", waited);
+        return false;
+    }
+    if (s.pending_readback && s.readback_mapped != nullptr && s.pending_readback_bytes != 0u) {
+        s.frame_rgba.resize(s.pending_readback_bytes);
+        std::memcpy(s.frame_rgba.data(), s.readback_mapped, s.pending_readback_bytes);
+        copied = true;
+        s.readback_latched = true;
+    }
+    release_staging(s);
+    s.submit_pending = false;
+    s.pending_readback = false;
+    s.pending_readback_bytes = 0u;
+    return true;
+}
+
 bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     VulkanState &s = state();
     std::lock_guard<std::recursive_mutex> guard(s.mutex);
-    if (!s.enabled || s.batches.empty()) {
+    const bool publish = ge_finish_shows_this_frame();
+    bool copied_previous = false;
+    const auto shown = [&]() {
+        const bool show = copied_previous || s.readback_latched;
+        if (publish) s.readback_latched = false;
+        return show;
+    };
+    if (s.enabled && !complete_pending_submit(s, copied_previous)) {
         s.vertices.clear();
         s.indices.clear();
         s.batches.clear();
         ++s.frame_epoch;
         return false;
+    }
+    if (!s.enabled || s.batches.empty()) {
+        s.vertices.clear();
+        s.indices.clear();
+        s.batches.clear();
+        ++s.frame_epoch;
+        return shown();
     }
     std::string error;
     const std::size_t vertex_bytes = s.vertices.size() * sizeof(UploadVertex);
@@ -1968,7 +2021,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         s.indices.clear();
         s.batches.clear();
         ++s.frame_epoch;
-        return false;
+        return shown();
     }
     if (s.geometry_mapped != nullptr) {
         if (!s.vertices.empty())
@@ -1987,7 +2040,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         s.vertices.clear();
         s.indices.clear();
         s.batches.clear();
-        return false;
+        return shown();
     }
     VkMemoryBarrier host{};
     host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2155,7 +2208,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     end_pass(s);
     Target *display = find_target(s, s.display_framebuffer);
     const bool display_ready = touched_display && display != nullptr && display->color.image != VK_NULL_HANDLE;
-    if (display_ready) {
+    if (publish && display_ready) {
         transition_image(s.command, display->color.image, display->color.layout,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1u);
         VkBufferImageCopy copy{};
@@ -2169,38 +2222,40 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     }
     const VkResult ended = vkEndCommandBuffer(s.command);
     if (ended != VK_SUCCESS) log_frame_failure(s, "vkEndCommandBuffer", ended);
-    bool readback = false;
+    bool submitted = false;
     if (ended == VK_SUCCESS) {
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1u;
         submit.pCommandBuffers = &s.command;
         const VkResult queued = vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE);
-        if (queued != VK_SUCCESS) log_frame_failure(s, "vkQueueSubmit", queued);
-        const VkResult waited = queued == VK_SUCCESS ? vkQueueWaitIdle(s.queue) : queued;
-        if (queued == VK_SUCCESS && waited != VK_SUCCESS) log_frame_failure(s, "vkQueueWaitIdle", waited);
-        if (queued == VK_SUCCESS && waited == VK_SUCCESS && display_ready && s.readback_mapped != nullptr) {
-            const std::size_t row = static_cast<std::size_t>(s.target_width) * 4u;
-            s.frame_rgba.resize(row * s.target_height);
-            std::memcpy(s.frame_rgba.data(), s.readback_mapped, s.frame_rgba.size());
-            readback = true;
-        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && !display_ready) {
-            log_frame_failure(s, "display target was not drawn", VK_SUCCESS);
-        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && s.readback_mapped == nullptr) {
-            log_frame_failure(s, "readback memory is not mapped", VK_ERROR_MEMORY_MAP_FAILED);
+        if (queued != VK_SUCCESS) {
+            log_frame_failure(s, "vkQueueSubmit", queued);
+        } else {
+            // The next finish waits, so this GPU work overlaps the next list.
+            submitted = true;
+            s.submit_pending = true;
+            s.pending_readback = publish && display_ready && s.readback_mapped != nullptr;
+            s.pending_readback_bytes = s.pending_readback
+                ? static_cast<std::size_t>(s.target_width) * s.target_height * 4u : 0u;
+            if (publish && !display_ready)
+                log_frame_failure(s, "display target was not drawn", VK_SUCCESS);
+            else if (publish && s.readback_mapped == nullptr)
+                log_frame_failure(s, "readback memory is not mapped", VK_ERROR_MEMORY_MAP_FAILED);
         }
     }
-    for (Staging &staging : s.staging) {
-        vkDestroyBuffer(s.device, staging.buffer, nullptr);
-        vkFreeMemory(s.device, staging.memory, nullptr);
+    if (!submitted) {
+        const VkResult reset = vkResetCommandBuffer(s.command, 0);
+        if (reset != VK_SUCCESS) log_frame_failure(s, "vkResetCommandBuffer", reset);
+        release_staging(s);
     }
-    s.staging.clear();
     if (!display_ready) ++s.report.frames_without_displayed_target;
     ++s.report.game_frames;
     s.report.game_frame_vblank = vblank;
     s.report.offscreen_width = s.target_width;
     s.report.offscreen_height = s.target_height;
-    s.report.game_frame_readback_bytes = readback ? s.frame_rgba.size() : 0u;
+    const bool show = shown();
+    s.report.game_frame_readback_bytes = show ? s.frame_rgba.size() : 0u;
     s.report.presented_framebuffer_target = display_ready ? s.display_framebuffer : 0u;
     s.report.gpu_frame_presented_to_window = false;
     s.vertices.clear();
@@ -2208,7 +2263,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     s.batches.clear();
     s.current_target = nullptr;
     ++s.frame_epoch;
-    return readback;
+    return show;
 }
 
 bool ge_gpu_backend_copy_game_frame_rgba(std::span<std::byte> destination) noexcept {

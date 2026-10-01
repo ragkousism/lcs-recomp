@@ -130,6 +130,8 @@ struct TimingConfiguration {
     std::uint32_t frame_rate{60u};
     bool realtime_speed_diagnostics{false};
     std::uint64_t realtime_speed_interval_vblanks{120u};
+    // Host sleep off. Each vblank still advances one 60 Hz guest step.
+    bool uncapped{false};
 };
 
 struct DiagnosticsConfiguration {

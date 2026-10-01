@@ -110,4 +110,14 @@ void flush_ge_deferred_rasterization(psprecomp::GuestMemory &memory);
 [[nodiscard]] GePhaseTotals ge_phase_totals() noexcept;
 void reset_ge_phase_totals() noexcept;
 
+struct GeListSplitNs {
+    std::uint64_t vertex_ns{};
+    std::uint64_t tex_hash_ns{};
+    std::uint64_t tex_decode_ns{};
+    std::uint64_t vertex_copy_ns{};
+    std::uint64_t vertex_reused{};
+    std::uint64_t vertex_decoded{};
+};
+[[nodiscard]] GeListSplitNs take_ge_list_split() noexcept;
+
 }

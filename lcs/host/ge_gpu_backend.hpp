@@ -401,6 +401,12 @@ void ge_gpu_backend_display_logical_size(std::uint32_t &width, std::uint32_t &he
 
 [[nodiscard]] bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept;
 
+// The list-split flush sets this false. Only the present finish is shown.
+inline bool &ge_finish_shows_this_frame() noexcept {
+    static bool show = true;
+    return show;
+}
+
 [[nodiscard]] bool ge_gpu_backend_copy_game_frame_rgba(
     std::span<std::byte> destination) noexcept;
 

@@ -3,6 +3,7 @@
 #include "lcs_profile.hpp"
 #include "display_window.hpp"
 #include "lcs_ge_exec.hpp"
+#include "ge_renderer.hpp"
 #include "lcs_sas.hpp"
 #include "ge_gpu_backend.hpp"
 #include "lcs_media_decoder.hpp"
@@ -1927,8 +1928,12 @@ bool ge_frame_split_enabled() {
 }
 
 void execute_ge_list_frame(psprecomp::Runtime &rt, std::uint32_t list_address, std::uint64_t vblank) {
-    if (ge_frame_split_enabled() && g_ge_list_since_finish && list_address != g_ge_last_list_address)
+    if (ge_frame_split_enabled() && g_ge_list_since_finish && list_address != g_ge_last_list_address) {
+        // Not the image the window keeps.
+        ge_finish_shows_this_frame() = false;
         (void)ge_gpu_backend_finish_color_frame(vblank);
+        ge_finish_shows_this_frame() = true;
+    }
     execute_ge_list_rendered(rt.memory(), list_address);
     g_ge_list_since_finish = true;
     g_ge_last_list_address = list_address;
@@ -2072,15 +2077,25 @@ void report_realtime_speed_if_requested(const psprecomp::Runtime &runtime, std::
     const double host_us = static_cast<double>(std::max<std::int64_t>(1,
         std::chrono::duration_cast<std::chrono::microseconds>(now - host_start).count()));
     const double guest_us = static_cast<double>(virtual_time_us - guest_start);
+    const GeListSplitNs list_split = take_ge_list_split();
+    const double vblank_count = static_cast<double>(vblanks);
     std::ostringstream line;
     line << std::fixed << std::setprecision(1)
          << "[realtime-speed] vblank=" << vblank_index
-         << " host_ms_per_vblank=" << host_us / static_cast<double>(vblanks) / 1000.0
+         << " host_ms_per_vblank=" << host_us / vblank_count / 1000.0
          << " emulation_speed_percent=" << guest_us * 100.0 / host_us
-         << " ge_list_ms=" << static_cast<double>(g_speed_ge_list_ns) / 1e6 / static_cast<double>(vblanks)
-         << " gpu_finish_ms=" << static_cast<double>(g_speed_gpu_finish_ns) / 1e6 / static_cast<double>(vblanks)
-         << " throttle_ms=" << static_cast<double>(g_speed_throttle_ns) / 1e6 / static_cast<double>(vblanks)
-         << " ge_wait_ms=" << static_cast<double>(g_speed_ge_wait_ns) / 1e6 / static_cast<double>(vblanks)
+         << " ge_list_ms=" << static_cast<double>(g_speed_ge_list_ns) / 1e6 / vblank_count
+         << " gpu_finish_ms=" << static_cast<double>(g_speed_gpu_finish_ns) / 1e6 / vblank_count
+         << " throttle_ms=" << static_cast<double>(g_speed_throttle_ns) / 1e6 / vblank_count
+         << " ge_wait_ms=" << static_cast<double>(g_speed_ge_wait_ns) / 1e6 / vblank_count
+         << " vertex_ms=" << static_cast<double>(list_split.vertex_ns) / 1e6 / vblank_count
+         << " vertex_reuse_pct=" << (list_split.vertex_reused + list_split.vertex_decoded == 0u
+                ? 0.0
+                : static_cast<double>(list_split.vertex_reused) * 100.0 /
+                      static_cast<double>(list_split.vertex_reused + list_split.vertex_decoded))
+         << " tex_hash_ms=" << static_cast<double>(list_split.tex_hash_ns) / 1e6 / vblank_count
+         << " tex_decode_ms=" << static_cast<double>(list_split.tex_decode_ns) / 1e6 / vblank_count
+         << " vertex_copy_ms=" << static_cast<double>(list_split.vertex_copy_ns) / 1e6 / vblank_count
          << "\n";
 
     note_thread_switch();
