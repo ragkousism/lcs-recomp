@@ -352,8 +352,17 @@ void blit_rgba(const void *pixels, std::uint32_t width, std::uint32_t height, in
     present_game_texture(width, height);
 }
 
+bool present_swapchain_rgba(const std::uint8_t *pixels, std::uint32_t width,
+                            std::uint32_t height) noexcept {
+    const std::span<const std::byte> rgba{
+        reinterpret_cast<const std::byte *>(pixels),
+        static_cast<std::size_t>(width) * height * 4u};
+    return ge_gpu_backend_present_guest_rgba(rgba, width, height);
+}
+
 void present_rgba_bytes(const std::uint8_t *pixels, std::uint32_t width, std::uint32_t height) {
     if (pixels == nullptr || width == 0u || height == 0u) return;
+    if (present_swapchain_rgba(pixels, width, height)) return;
     const std::size_t bytes = static_cast<std::size_t>(width) * height * 4u;
     // Wayland only shows a window whose buffers are committed on the thread that created it.
     // GE completion runs on a worker thread, so hand the pixels to the window thread.
@@ -368,9 +377,32 @@ void present_rgba_bytes(const std::uint8_t *pixels, std::uint32_t width, std::ui
 
 void present_pending_frame() {
     if (g_pending_frame.empty() || g_pending_width == 0u || g_pending_height == 0u) return;
+    if (present_swapchain_rgba(g_pending_frame.data(), g_pending_width, g_pending_height)) {
+        g_pending_frame.clear();
+        return;
+    }
     blit_rgba(g_pending_frame.data(), g_pending_width, g_pending_height,
               static_cast<int>(g_pending_width * 4u));
     g_pending_frame.clear();
+}
+
+void create_software_renderer() {
+    if (g_window == nullptr || g_renderer != nullptr) return;
+    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
+    if (g_renderer == nullptr) {
+        std::cerr << "[window] SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
+        return;
+    }
+    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
+    SDL_RenderClear(g_renderer);
+    SDL_RenderPresent(g_renderer);
+    int width = 0;
+    int height = 0;
+    SDL_GetWindowSize(g_window, &width, &height);
+    SDL_RendererInfo info{};
+    const char *renderer_name = SDL_GetRendererInfo(g_renderer, &info) == 0 ? info.name : "unknown";
+    std::cerr << "[window] shown " << width << "x" << height
+              << " renderer=" << renderer_name << "  F10 host settings\n";
 }
 
 }  // namespace
@@ -386,24 +418,24 @@ void display_window_init() {
     const bool nearest = lcs_render_configuration().display.upscale_filter == DisplayUpscaleFilter::Nearest;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, nearest ? "0" : "1");
     const DisplaySurfaceDimensions surface = resolve_window_dimensions();
+    // Takes the Wayland surface, so create it only when the swapchain cannot.
+    // SDL_WINDOW_VULKAN fails when the video driver has no Vulkan support.
+    const Uint32 window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN;
     g_window = SDL_CreateWindow("LCSNative - GTA: Liberty City Stories",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                 static_cast<int>(surface.width), static_cast<int>(surface.height),
-                                SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN);
+                                window_flags | SDL_WINDOW_VULKAN);
+    if (g_window == nullptr) {
+        std::cerr << "[window] Vulkan window unavailable: " << SDL_GetError() << "\n";
+        g_window = SDL_CreateWindow("LCSNative - GTA: Liberty City Stories",
+                                    SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+                                    static_cast<int>(surface.width), static_cast<int>(surface.height),
+                                    window_flags);
+    }
     if (g_window == nullptr) {
         std::cerr << "[window] SDL_CreateWindow failed: " << SDL_GetError() << "\n";
         return;
     }
-    // CPU pixels go through a shared-memory buffer. An accelerated renderer
-    // never commits that buffer on KDE Wayland, so the toplevel stays invisible.
-    g_renderer = SDL_CreateRenderer(g_window, -1, SDL_RENDERER_SOFTWARE);
-    if (g_renderer == nullptr) {
-        std::cerr << "[window] SDL_CreateRenderer failed: " << SDL_GetError() << "\n";
-        return;
-    }
-    SDL_SetRenderDrawColor(g_renderer, 0, 0, 0, 255);
-    SDL_RenderClear(g_renderer);
-    SDL_RenderPresent(g_renderer);
     SDL_ShowWindow(g_window);
     SDL_RaiseWindow(g_window);
     pump_events();
@@ -412,16 +444,22 @@ void display_window_init() {
         open_pad(index);
         if (g_pad != nullptr) break;
     }
-    SDL_RendererInfo info{};
-    const char *renderer_name = SDL_GetRendererInfo(g_renderer, &info) == 0 ? info.name : "unknown";
-    std::cerr << "[window] shown " << surface.width << "x" << surface.height
-              << " renderer=" << renderer_name << "  F10 host settings\n";
     ge_gpu_backend_set_native_window(g_window);
 }
 
 void display_window_attach_gpu_backend() {
     std::lock_guard<std::mutex> guard(g_sdl_mutex);
-    if (g_window != nullptr) ge_gpu_backend_set_native_window(g_window);
+    if (g_window == nullptr) return;
+    ge_gpu_backend_set_native_window(g_window);
+    if (ge_gpu_backend_guest_present_available()) {
+        int width = 0;
+        int height = 0;
+        SDL_GetWindowSize(g_window, &width, &height);
+        std::cerr << "[window] shown " << width << "x" << height
+                  << " presenter=vulkan  F10 host settings\n";
+        return;
+    }
+    create_software_renderer();
 }
 
 bool display_window_profile_key_pressed() {

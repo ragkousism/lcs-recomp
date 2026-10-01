@@ -2,11 +2,15 @@
 
 #if defined(LCS_VULKAN_GE_BACKEND)
 
+#include "lcs_display_menu.hpp"
 #include "lcs_render_config.hpp"
 #include "lcs_runtime_log.hpp"
 #include "vulkan/ge_spv.hpp"
 
 #include <vulkan/vulkan.h>
+
+#include <SDL.h>
+#include <SDL_vulkan.h>
 
 #include <algorithm>
 #include <array>
@@ -181,6 +185,50 @@ struct VulkanState {
     std::uint64_t frame_epoch{1u};
     bool pass_open{};
     Target *current_target{};
+    // Previous submit still owns the command buffer, geometry, and readback.
+    bool submit_pending{};
+    bool pending_readback{};
+    std::size_t pending_readback_bytes{};
+    // Copied pixels the present finish has not shown yet.
+    bool readback_latched{};
+    SDL_Window *window{};
+    VkSurfaceKHR surface{};
+    VkSwapchainKHR swapchain{};
+    VkFormat swap_format{VK_FORMAT_UNDEFINED};
+    VkPresentModeKHR swap_present_mode{VK_PRESENT_MODE_FIFO_KHR};
+    std::uint32_t swap_width{};
+    std::uint32_t swap_height{};
+    std::vector<VkImage> swap_images;
+    std::vector<VkImageView> swap_views;
+    std::vector<VkFramebuffer> swap_framebuffers;
+    std::vector<VkPresentModeKHR> swap_present_modes;
+    VkRenderPass present_pass{};
+    VkPipeline present_pipeline{};
+    VkPipelineLayout present_layout{};
+    VkDescriptorSetLayout present_set_layout{};
+    VkDescriptorPool present_pool{};
+    std::array<VkDescriptorSet, 4> present_sets{};
+    VkSampler game_sampler{};
+    VkSampler overlay_sampler{};
+    bool game_sampler_linear{};
+    VkShaderModule present_vertex_shader{};
+    VkShaderModule present_fragment_shader{};
+    VkSemaphore acquire_semaphore{};
+    // One per swapchain image. The next acquire of that image releases it.
+    std::vector<VkSemaphore> present_semaphores;
+    GpuImage fps_overlay{};
+    GpuImage settings_overlay{};
+    GpuImage guest_image{};
+    VkBuffer present_staging{};
+    VkDeviceMemory present_staging_memory{};
+    void *present_staging_mapped{};
+    VkDeviceSize present_staging_bytes{};
+    std::uint32_t present_image_index{};
+    bool present_recorded{};
+    bool direct_present_ok{};
+    bool swapchain_extension{};
+    bool swapchain_dirty{};
+    bool present_lost{};
 };
 
 VulkanState &state() {
@@ -1071,13 +1119,1011 @@ void destroy_target(VulkanState &s, Target &target) noexcept {
     target.depth_memory = VK_NULL_HANDLE;
 }
 
+constexpr std::size_t kPresentGame = 0u;
+constexpr std::size_t kPresentFps = 1u;
+constexpr std::size_t kPresentSettings = 2u;
+constexpr std::size_t kPresentGuest = 3u;
+
+VkDeviceSize align_upload(VkDeviceSize value) noexcept {
+    return (value + 255u) & ~VkDeviceSize{255u};
+}
+
+const char *swap_format_name(VkFormat format) noexcept {
+    switch (format) {
+    case VK_FORMAT_R8G8B8A8_UNORM: return "RGBA8";
+    case VK_FORMAT_B8G8R8A8_UNORM: return "BGRA8";
+    default: return "other";
+    }
+}
+
+const char *present_mode_name(VkPresentModeKHR mode) noexcept {
+    switch (mode) {
+    case VK_PRESENT_MODE_IMMEDIATE_KHR: return "immediate";
+    case VK_PRESENT_MODE_MAILBOX_KHR: return "mailbox";
+    case VK_PRESENT_MODE_FIFO_KHR: return "fifo";
+    default: return "other";
+    }
+}
+
+bool window_pixels(SDL_Window *window, std::uint32_t &width, std::uint32_t &height) noexcept {
+    if (window == nullptr) return false;
+    int w = 0;
+    int h = 0;
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN) != 0u)
+        SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    if (w <= 0 || h <= 0) SDL_GetWindowSize(window, &w, &h);
+    if (w <= 0 || h <= 0) return false;
+    width = static_cast<std::uint32_t>(w);
+    height = static_cast<std::uint32_t>(h);
+    return true;
+}
+
+void destroy_surface(VulkanState &s) noexcept {
+    if (s.surface != VK_NULL_HANDLE && s.instance != VK_NULL_HANDLE)
+        vkDestroySurfaceKHR(s.instance, s.surface, nullptr);
+    s.surface = VK_NULL_HANDLE;
+}
+
+void destroy_swap_views(VulkanState &s) noexcept {
+    if (s.device != VK_NULL_HANDLE) {
+        for (VkFramebuffer framebuffer : s.swap_framebuffers) {
+            if (framebuffer != VK_NULL_HANDLE) vkDestroyFramebuffer(s.device, framebuffer, nullptr);
+        }
+        for (VkImageView view : s.swap_views) {
+            if (view != VK_NULL_HANDLE) vkDestroyImageView(s.device, view, nullptr);
+        }
+    }
+    s.swap_framebuffers.clear();
+    s.swap_views.clear();
+    s.swap_images.clear();
+}
+
+void destroy_present_pipeline(VulkanState &s) noexcept {
+    if (s.device != VK_NULL_HANDLE) {
+        if (s.present_pipeline != VK_NULL_HANDLE) vkDestroyPipeline(s.device, s.present_pipeline, nullptr);
+        if (s.present_layout != VK_NULL_HANDLE) vkDestroyPipelineLayout(s.device, s.present_layout, nullptr);
+        if (s.present_pass != VK_NULL_HANDLE) vkDestroyRenderPass(s.device, s.present_pass, nullptr);
+        if (s.present_pool != VK_NULL_HANDLE) vkDestroyDescriptorPool(s.device, s.present_pool, nullptr);
+        if (s.present_set_layout != VK_NULL_HANDLE)
+            vkDestroyDescriptorSetLayout(s.device, s.present_set_layout, nullptr);
+        if (s.present_vertex_shader != VK_NULL_HANDLE)
+            vkDestroyShaderModule(s.device, s.present_vertex_shader, nullptr);
+        if (s.present_fragment_shader != VK_NULL_HANDLE)
+            vkDestroyShaderModule(s.device, s.present_fragment_shader, nullptr);
+    }
+    s.present_pipeline = VK_NULL_HANDLE;
+    s.present_layout = VK_NULL_HANDLE;
+    s.present_pass = VK_NULL_HANDLE;
+    s.present_pool = VK_NULL_HANDLE;
+    s.present_set_layout = VK_NULL_HANDLE;
+    s.present_vertex_shader = VK_NULL_HANDLE;
+    s.present_fragment_shader = VK_NULL_HANDLE;
+    s.present_sets = {};
+}
+
+void destroy_present_semaphores(VulkanState &s) noexcept {
+    if (s.device != VK_NULL_HANDLE) {
+        for (VkSemaphore semaphore : s.present_semaphores) {
+            if (semaphore != VK_NULL_HANDLE) vkDestroySemaphore(s.device, semaphore, nullptr);
+        }
+    }
+    s.present_semaphores.clear();
+}
+
+void destroy_present_device(VulkanState &s) noexcept {
+    destroy_swap_views(s);
+    if (s.device != VK_NULL_HANDLE && s.swapchain != VK_NULL_HANDLE)
+        vkDestroySwapchainKHR(s.device, s.swapchain, nullptr);
+    s.swapchain = VK_NULL_HANDLE;
+    destroy_present_pipeline(s);
+    if (s.device != VK_NULL_HANDLE) {
+        if (s.game_sampler != VK_NULL_HANDLE) vkDestroySampler(s.device, s.game_sampler, nullptr);
+        if (s.overlay_sampler != VK_NULL_HANDLE) vkDestroySampler(s.device, s.overlay_sampler, nullptr);
+        if (s.acquire_semaphore != VK_NULL_HANDLE) vkDestroySemaphore(s.device, s.acquire_semaphore, nullptr);
+        destroy_present_semaphores(s);
+        if (s.present_staging_mapped != nullptr) vkUnmapMemory(s.device, s.present_staging_memory);
+        if (s.present_staging != VK_NULL_HANDLE) vkDestroyBuffer(s.device, s.present_staging, nullptr);
+        if (s.present_staging_memory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.present_staging_memory, nullptr);
+    }
+    s.game_sampler = VK_NULL_HANDLE;
+    s.overlay_sampler = VK_NULL_HANDLE;
+    s.acquire_semaphore = VK_NULL_HANDLE;
+    s.present_semaphores.clear();
+    s.present_staging = VK_NULL_HANDLE;
+    s.present_staging_memory = VK_NULL_HANDLE;
+    s.present_staging_mapped = nullptr;
+    s.present_staging_bytes = 0u;
+    destroy_image(s, s.fps_overlay);
+    destroy_image(s, s.settings_overlay);
+    destroy_image(s, s.guest_image);
+    s.swap_format = VK_FORMAT_UNDEFINED;
+    s.swap_present_mode = VK_PRESENT_MODE_FIFO_KHR;
+    s.swap_width = 0u;
+    s.swap_height = 0u;
+    s.swap_present_modes.clear();
+    s.present_image_index = 0u;
+    s.present_recorded = false;
+    s.direct_present_ok = false;
+    s.swapchain_dirty = false;
+    s.present_lost = false;
+    s.report.swapchain_active = false;
+}
+
+bool create_window_surface(VulkanState &s, std::string &error) {
+    if (s.surface != VK_NULL_HANDLE) return true;
+    if (s.window == nullptr || s.instance == VK_NULL_HANDLE ||
+        (SDL_GetWindowFlags(s.window) & SDL_WINDOW_VULKAN) == 0u) {
+        error = "Vulkan present has no Vulkan-capable window";
+        return false;
+    }
+    if (SDL_Vulkan_CreateSurface(s.window, s.instance, &s.surface) != SDL_TRUE) {
+        error = std::string("SDL_Vulkan_CreateSurface failed: ") + SDL_GetError();
+        return false;
+    }
+    return true;
+}
+
+bool device_has_swapchain(VkPhysicalDevice device) {
+    std::uint32_t count = 0u;
+    vkEnumerateDeviceExtensionProperties(device, nullptr, &count, nullptr);
+    std::vector<VkExtensionProperties> extensions(count);
+    if (count > 0u)
+        vkEnumerateDeviceExtensionProperties(device, nullptr, &count, extensions.data());
+    for (const VkExtensionProperties &extension : extensions) {
+        if (std::strcmp(extension.extensionName, VK_KHR_SWAPCHAIN_EXTENSION_NAME) == 0) return true;
+    }
+    return false;
+}
+
+std::uint32_t graphics_family(VkPhysicalDevice device, VkSurfaceKHR surface, bool need_present) {
+    std::uint32_t count = 0u;
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, nullptr);
+    std::vector<VkQueueFamilyProperties> families(count);
+    vkGetPhysicalDeviceQueueFamilyProperties(device, &count, families.data());
+    for (std::uint32_t index = 0u; index < count; ++index) {
+        if ((families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) == 0u) continue;
+        if (!need_present || surface == VK_NULL_HANDLE) return index;
+        VkBool32 supported = VK_FALSE;
+        if (vkGetPhysicalDeviceSurfaceSupportKHR(device, index, surface, &supported) == VK_SUCCESS &&
+            supported == VK_TRUE)
+            return index;
+    }
+    return 0xFFFFFFFFu;
+}
+
+bool select_present_device(VulkanState &s, std::string &error) {
+    std::uint32_t device_count = 0u;
+    vkEnumeratePhysicalDevices(s.instance, &device_count, nullptr);
+    if (device_count == 0u) {
+        error = "No Vulkan physical device";
+        return false;
+    }
+    std::vector<VkPhysicalDevice> devices(device_count);
+    vkEnumeratePhysicalDevices(s.instance, &device_count, devices.data());
+    s.report.physical_device_count = device_count;
+    VkPhysicalDevice chosen = VK_NULL_HANDLE;
+    std::uint32_t family = 0xFFFFFFFFu;
+    VkPhysicalDevice fallback = VK_NULL_HANDLE;
+    std::uint32_t fallback_family = 0xFFFFFFFFu;
+    for (VkPhysicalDevice device : devices) {
+        const std::uint32_t graphics = graphics_family(device, s.surface, false);
+        if (graphics == 0xFFFFFFFFu) continue;
+        VkPhysicalDeviceProperties properties{};
+        vkGetPhysicalDeviceProperties(device, &properties);
+        const bool discrete = properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU;
+        if (fallback == VK_NULL_HANDLE || discrete) {
+            fallback = device;
+            fallback_family = graphics;
+        }
+        if (s.surface == VK_NULL_HANDLE) continue;
+        const std::uint32_t presenting = graphics_family(device, s.surface, true);
+        if (presenting == 0xFFFFFFFFu) continue;
+        if (chosen == VK_NULL_HANDLE || discrete) {
+            chosen = device;
+            family = presenting;
+            if (discrete) break;
+        }
+    }
+    if (s.surface != VK_NULL_HANDLE && chosen == VK_NULL_HANDLE) {
+        std::cerr << "[vulkan] no graphics queue can present; using the CPU readback\n";
+        destroy_surface(s);
+    }
+    if (chosen == VK_NULL_HANDLE) {
+        chosen = fallback;
+        family = fallback_family;
+    }
+    if (chosen == VK_NULL_HANDLE || family == 0xFFFFFFFFu) {
+        error = "No Vulkan graphics queue";
+        return false;
+    }
+    s.physical = chosen;
+    s.queue_family = family;
+    s.report.graphics_queue_family = family;
+    return true;
+}
+
+VkSampler make_present_sampler(VulkanState &s, bool linear) {
+    VkSamplerCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
+    info.magFilter = linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
+    info.minFilter = info.magFilter;
+    info.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    info.addressModeU = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeV = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    info.addressModeW = VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE;
+    VkSampler sampler = VK_NULL_HANDLE;
+    if (vkCreateSampler(s.device, &info, nullptr, &sampler) != VK_SUCCESS) return VK_NULL_HANDLE;
+    return sampler;
+}
+
+bool load_shader_words(VulkanState &s, const std::uint32_t *words, std::size_t count, VkShaderModule &module) {
+    VkShaderModuleCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+    info.codeSize = count * sizeof(std::uint32_t);
+    info.pCode = words;
+    return vkCreateShaderModule(s.device, &info, nullptr, &module) == VK_SUCCESS;
+}
+
+bool ensure_present_pipeline(VulkanState &s, VkFormat format, std::string &error) {
+    if (s.present_pipeline != VK_NULL_HANDLE && s.swap_format == format) return true;
+    destroy_present_pipeline(s);
+    if (!load_shader_words(s, kVulkanPresentVertexSpirv, std::size(kVulkanPresentVertexSpirv),
+                           s.present_vertex_shader) ||
+        !load_shader_words(s, kVulkanPresentFragmentSpirv, std::size(kVulkanPresentFragmentSpirv),
+                           s.present_fragment_shader)) {
+        error = "Vulkan present shader failed";
+        return false;
+    }
+    VkAttachmentDescription attachment{};
+    attachment.format = format;
+    attachment.samples = VK_SAMPLE_COUNT_1_BIT;
+    attachment.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+    attachment.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
+    attachment.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    attachment.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    attachment.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    attachment.finalLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
+    VkAttachmentReference color{0u, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription subpass{};
+    subpass.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
+    subpass.colorAttachmentCount = 1u;
+    subpass.pColorAttachments = &color;
+    VkSubpassDependency dependency{};
+    dependency.srcSubpass = VK_SUBPASS_EXTERNAL;
+    dependency.dstSubpass = 0u;
+    dependency.srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    dependency.dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
+    VkRenderPassCreateInfo pass{};
+    pass.sType = VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO;
+    pass.attachmentCount = 1u;
+    pass.pAttachments = &attachment;
+    pass.subpassCount = 1u;
+    pass.pSubpasses = &subpass;
+    pass.dependencyCount = 1u;
+    pass.pDependencies = &dependency;
+    if (vkCreateRenderPass(s.device, &pass, nullptr, &s.present_pass) != VK_SUCCESS) {
+        error = "Vulkan present render pass failed";
+        return false;
+    }
+    VkDescriptorSetLayoutBinding binding{};
+    binding.binding = 0u;
+    binding.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    binding.descriptorCount = 1u;
+    binding.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    VkDescriptorSetLayoutCreateInfo set_info{};
+    set_info.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+    set_info.bindingCount = 1u;
+    set_info.pBindings = &binding;
+    if (vkCreateDescriptorSetLayout(s.device, &set_info, nullptr, &s.present_set_layout) != VK_SUCCESS) {
+        error = "Vulkan present descriptor layout failed";
+        return false;
+    }
+    VkPushConstantRange range{};
+    range.stageFlags = VK_SHADER_STAGE_FRAGMENT_BIT;
+    range.size = 4u;
+    VkPipelineLayoutCreateInfo layout{};
+    layout.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+    layout.setLayoutCount = 1u;
+    layout.pSetLayouts = &s.present_set_layout;
+    layout.pushConstantRangeCount = 1u;
+    layout.pPushConstantRanges = &range;
+    if (vkCreatePipelineLayout(s.device, &layout, nullptr, &s.present_layout) != VK_SUCCESS) {
+        error = "Vulkan present pipeline layout failed";
+        return false;
+    }
+    VkDescriptorPoolSize pool_size{VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 4u};
+    VkDescriptorPoolCreateInfo pool{};
+    pool.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    pool.maxSets = 4u;
+    pool.poolSizeCount = 1u;
+    pool.pPoolSizes = &pool_size;
+    if (vkCreateDescriptorPool(s.device, &pool, nullptr, &s.present_pool) != VK_SUCCESS) {
+        error = "Vulkan present descriptor pool failed";
+        return false;
+    }
+    const VkDescriptorSetLayout layouts[4]{s.present_set_layout, s.present_set_layout, s.present_set_layout,
+                                           s.present_set_layout};
+    VkDescriptorSetAllocateInfo alloc{};
+    alloc.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    alloc.descriptorPool = s.present_pool;
+    alloc.descriptorSetCount = 4u;
+    alloc.pSetLayouts = layouts;
+    if (vkAllocateDescriptorSets(s.device, &alloc, s.present_sets.data()) != VK_SUCCESS) {
+        error = "Vulkan present descriptor sets failed";
+        return false;
+    }
+    VkPipelineShaderStageCreateInfo stages[2]{};
+    stages[0].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[0].stage = VK_SHADER_STAGE_VERTEX_BIT;
+    stages[0].module = s.present_vertex_shader;
+    stages[0].pName = "main";
+    stages[1].sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+    stages[1].stage = VK_SHADER_STAGE_FRAGMENT_BIT;
+    stages[1].module = s.present_fragment_shader;
+    stages[1].pName = "main";
+    VkPipelineVertexInputStateCreateInfo vertex{};
+    vertex.sType = VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO;
+    VkPipelineInputAssemblyStateCreateInfo assembly{};
+    assembly.sType = VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO;
+    assembly.topology = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    VkPipelineViewportStateCreateInfo viewport{};
+    viewport.sType = VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO;
+    viewport.viewportCount = 1u;
+    viewport.scissorCount = 1u;
+    VkPipelineRasterizationStateCreateInfo raster{};
+    raster.sType = VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO;
+    raster.polygonMode = VK_POLYGON_MODE_FILL;
+    raster.cullMode = VK_CULL_MODE_NONE;
+    raster.frontFace = VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    raster.lineWidth = 1.0f;
+    VkPipelineMultisampleStateCreateInfo multisample{};
+    multisample.sType = VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO;
+    multisample.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
+    VkPipelineDepthStencilStateCreateInfo depth{};
+    depth.sType = VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO;
+    VkPipelineColorBlendAttachmentState blend{};
+    blend.blendEnable = VK_TRUE;
+    blend.srcColorBlendFactor = VK_BLEND_FACTOR_SRC_ALPHA;
+    blend.dstColorBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.colorBlendOp = VK_BLEND_OP_ADD;
+    blend.srcAlphaBlendFactor = VK_BLEND_FACTOR_ONE;
+    blend.dstAlphaBlendFactor = VK_BLEND_FACTOR_ONE_MINUS_SRC_ALPHA;
+    blend.alphaBlendOp = VK_BLEND_OP_ADD;
+    blend.colorWriteMask = VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT |
+                           VK_COLOR_COMPONENT_A_BIT;
+    VkPipelineColorBlendStateCreateInfo blending{};
+    blending.sType = VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO;
+    blending.attachmentCount = 1u;
+    blending.pAttachments = &blend;
+    VkDynamicState dynamics[]{VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR};
+    VkPipelineDynamicStateCreateInfo dynamic{};
+    dynamic.sType = VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO;
+    dynamic.dynamicStateCount = 2u;
+    dynamic.pDynamicStates = dynamics;
+    VkGraphicsPipelineCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO;
+    info.stageCount = 2u;
+    info.pStages = stages;
+    info.pVertexInputState = &vertex;
+    info.pInputAssemblyState = &assembly;
+    info.pViewportState = &viewport;
+    info.pRasterizationState = &raster;
+    info.pMultisampleState = &multisample;
+    info.pDepthStencilState = &depth;
+    info.pColorBlendState = &blending;
+    info.pDynamicState = &dynamic;
+    info.layout = s.present_layout;
+    info.renderPass = s.present_pass;
+    if (vkCreateGraphicsPipelines(s.device, VK_NULL_HANDLE, 1u, &info, nullptr, &s.present_pipeline) !=
+        VK_SUCCESS) {
+        error = "Vulkan present pipeline failed";
+        return false;
+    }
+    if (s.overlay_sampler == VK_NULL_HANDLE) s.overlay_sampler = make_present_sampler(s, false);
+    if (s.overlay_sampler == VK_NULL_HANDLE) {
+        error = "Vulkan present sampler failed";
+        return false;
+    }
+    s.swap_format = format;
+    return true;
+}
+
+bool ensure_present_semaphores(VulkanState &s, std::uint32_t count, std::string &error) {
+    destroy_present_semaphores(s);
+    VkSemaphoreCreateInfo info{};
+    info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+    if (s.acquire_semaphore == VK_NULL_HANDLE &&
+        vkCreateSemaphore(s.device, &info, nullptr, &s.acquire_semaphore) != VK_SUCCESS) {
+        error = "Vulkan present semaphore failed";
+        return false;
+    }
+    s.present_semaphores.resize(count, VK_NULL_HANDLE);
+    for (VkSemaphore &semaphore : s.present_semaphores) {
+        if (vkCreateSemaphore(s.device, &info, nullptr, &semaphore) != VK_SUCCESS) {
+            error = "Vulkan present semaphore failed";
+            return false;
+        }
+    }
+    return true;
+}
+
+VkFormat choose_swap_format(VkPhysicalDevice device, VkSurfaceKHR surface) {
+    std::uint32_t count = 0u;
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &count, nullptr);
+    if (count == 0u) return VK_FORMAT_UNDEFINED;
+    std::vector<VkSurfaceFormatKHR> formats(count);
+    vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, &count, formats.data());
+    if (count == 1u && formats[0].format == VK_FORMAT_UNDEFINED) return VK_FORMAT_R8G8B8A8_UNORM;
+    for (const VkSurfaceFormatKHR &format : formats) {
+        if (format.colorSpace == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR &&
+            (format.format == VK_FORMAT_R8G8B8A8_UNORM || format.format == VK_FORMAT_B8G8R8A8_UNORM))
+            return format.format;
+    }
+    for (const VkSurfaceFormatKHR &format : formats) {
+        if (format.format == VK_FORMAT_R8G8B8A8_UNORM || format.format == VK_FORMAT_B8G8R8A8_UNORM)
+            return format.format;
+    }
+    return formats[0].format;
+}
+
+VkPresentModeKHR desired_present_mode(const VulkanState &s) noexcept {
+    if (lcs_render_configuration().display.vsync) return VK_PRESENT_MODE_FIFO_KHR;
+    for (VkPresentModeKHR mode : s.swap_present_modes) {
+        if (mode == VK_PRESENT_MODE_MAILBOX_KHR) return mode;
+    }
+    for (VkPresentModeKHR mode : s.swap_present_modes) {
+        if (mode == VK_PRESENT_MODE_IMMEDIATE_KHR) return mode;
+    }
+    return VK_PRESENT_MODE_FIFO_KHR;
+}
+
+bool ensure_swapchain(VulkanState &s, std::string &error) {
+    if (s.present_lost || s.device == VK_NULL_HANDLE || !s.swapchain_extension) {
+        error = "Vulkan swapchain is not available";
+        return false;
+    }
+    if (s.surface == VK_NULL_HANDLE && !create_window_surface(s, error)) return false;
+    std::uint32_t drawable_w = 0u;
+    std::uint32_t drawable_h = 0u;
+    if (!window_pixels(s.window, drawable_w, drawable_h)) {
+        if (s.swapchain != VK_NULL_HANDLE) return true;
+        error = "Vulkan window size is zero";
+        return false;
+    }
+    VkSurfaceCapabilitiesKHR caps{};
+    if (vkGetPhysicalDeviceSurfaceCapabilitiesKHR(s.physical, s.surface, &caps) != VK_SUCCESS) {
+        error = "vkGetPhysicalDeviceSurfaceCapabilitiesKHR failed";
+        return false;
+    }
+    VkExtent2D extent = caps.currentExtent;
+    if (extent.width == 0xFFFFFFFFu) {
+        extent.width = std::clamp(drawable_w, caps.minImageExtent.width, caps.maxImageExtent.width);
+        extent.height = std::clamp(drawable_h, caps.minImageExtent.height, caps.maxImageExtent.height);
+    }
+    if (extent.width == 0u || extent.height == 0u) {
+        if (s.swapchain != VK_NULL_HANDLE) return true;
+        error = "Vulkan surface extent is zero";
+        return false;
+    }
+    if ((caps.supportedUsageFlags & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) == 0u) {
+        error = "Vulkan surface cannot be a color attachment";
+        return false;
+    }
+    if (s.swap_present_modes.empty()) {
+        std::uint32_t mode_count = 0u;
+        vkGetPhysicalDeviceSurfacePresentModesKHR(s.physical, s.surface, &mode_count, nullptr);
+        s.swap_present_modes.resize(mode_count);
+        if (mode_count > 0u)
+            vkGetPhysicalDeviceSurfacePresentModesKHR(s.physical, s.surface, &mode_count,
+                                                      s.swap_present_modes.data());
+    }
+    const VkFormat format = choose_swap_format(s.physical, s.surface);
+    if (format == VK_FORMAT_UNDEFINED) {
+        error = "Vulkan surface has no present format";
+        return false;
+    }
+    const VkPresentModeKHR mode = desired_present_mode(s);
+    if (!s.swapchain_dirty && s.swapchain != VK_NULL_HANDLE && s.present_pipeline != VK_NULL_HANDLE &&
+        s.swap_width == extent.width && s.swap_height == extent.height && s.swap_present_mode == mode &&
+        s.swap_format == format && !s.swap_framebuffers.empty() &&
+        s.swap_framebuffers.size() == s.swap_images.size())
+        return true;
+    if (s.swapchain != VK_NULL_HANDLE) vkDeviceWaitIdle(s.device);
+    const bool format_changed = s.present_pass != VK_NULL_HANDLE && s.swap_format != format;
+    destroy_swap_views(s);
+    if (format_changed) destroy_present_pipeline(s);
+    std::uint32_t image_count = caps.minImageCount + 1u;
+    if (caps.maxImageCount > 0u && image_count > caps.maxImageCount) image_count = caps.maxImageCount;
+    VkCompositeAlphaFlagBitsKHR composite = VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR;
+    if ((caps.supportedCompositeAlpha & composite) == 0u) {
+        if ((caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR) != 0u)
+            composite = VK_COMPOSITE_ALPHA_INHERIT_BIT_KHR;
+        else if ((caps.supportedCompositeAlpha & VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR) != 0u)
+            composite = VK_COMPOSITE_ALPHA_PRE_MULTIPLIED_BIT_KHR;
+        else
+            composite = VK_COMPOSITE_ALPHA_POST_MULTIPLIED_BIT_KHR;
+    }
+    VkSwapchainCreateInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR;
+    info.surface = s.surface;
+    info.minImageCount = image_count;
+    info.imageFormat = format;
+    info.imageColorSpace = VK_COLOR_SPACE_SRGB_NONLINEAR_KHR;
+    info.imageExtent = extent;
+    info.imageArrayLayers = 1u;
+    info.imageUsage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    info.imageSharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    info.preTransform = (caps.supportedTransforms & VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR) != 0u
+                            ? VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR
+                            : caps.currentTransform;
+    info.compositeAlpha = composite;
+    info.presentMode = mode;
+    info.clipped = VK_TRUE;
+    info.oldSwapchain = s.swapchain;
+    VkSwapchainKHR created = VK_NULL_HANDLE;
+    if (vkCreateSwapchainKHR(s.device, &info, nullptr, &created) != VK_SUCCESS) {
+        // oldSwapchain is retired even when creation fails.
+        if (s.swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(s.device, s.swapchain, nullptr);
+        s.swapchain = VK_NULL_HANDLE;
+        s.swapchain_dirty = true;
+        s.report.swapchain_active = false;
+        error = "vkCreateSwapchainKHR failed";
+        return false;
+    }
+    if (s.swapchain != VK_NULL_HANDLE) vkDestroySwapchainKHR(s.device, s.swapchain, nullptr);
+    s.swapchain = created;
+    s.swap_width = extent.width;
+    s.swap_height = extent.height;
+    s.swap_present_mode = mode;
+    s.swapchain_dirty = false;
+    if (!ensure_present_pipeline(s, format, error)) return false;
+    std::uint32_t created_count = 0u;
+    vkGetSwapchainImagesKHR(s.device, s.swapchain, &created_count, nullptr);
+    s.swap_images.resize(created_count);
+    if (created_count == 0u ||
+        vkGetSwapchainImagesKHR(s.device, s.swapchain, &created_count, s.swap_images.data()) != VK_SUCCESS) {
+        error = "vkGetSwapchainImagesKHR failed";
+        return false;
+    }
+    if (!ensure_present_semaphores(s, created_count, error)) return false;
+    s.swap_views.reserve(s.swap_images.size());
+    s.swap_framebuffers.reserve(s.swap_images.size());
+    for (VkImage image : s.swap_images) {
+        VkImageViewCreateInfo view{};
+        view.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
+        view.image = image;
+        view.viewType = VK_IMAGE_VIEW_TYPE_2D;
+        view.format = format;
+        view.subresourceRange.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+        view.subresourceRange.levelCount = 1u;
+        view.subresourceRange.layerCount = 1u;
+        VkImageView image_view = VK_NULL_HANDLE;
+        if (vkCreateImageView(s.device, &view, nullptr, &image_view) != VK_SUCCESS) {
+            error = "Vulkan swapchain image view failed";
+            return false;
+        }
+        VkFramebufferCreateInfo framebuffer{};
+        framebuffer.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO;
+        framebuffer.renderPass = s.present_pass;
+        framebuffer.attachmentCount = 1u;
+        framebuffer.pAttachments = &image_view;
+        framebuffer.width = extent.width;
+        framebuffer.height = extent.height;
+        framebuffer.layers = 1u;
+        VkFramebuffer buffer = VK_NULL_HANDLE;
+        if (vkCreateFramebuffer(s.device, &framebuffer, nullptr, &buffer) != VK_SUCCESS) {
+            vkDestroyImageView(s.device, image_view, nullptr);
+            error = "Vulkan swapchain framebuffer failed";
+            return false;
+        }
+        s.swap_views.push_back(image_view);
+        s.swap_framebuffers.push_back(buffer);
+    }
+    s.report.swapchain_active = true;
+    std::cerr << "[vulkan] swapchain " << extent.width << "x" << extent.height << " "
+              << swap_format_name(format) << " " << present_mode_name(mode) << "\n";
+    return true;
+}
+
+bool ensure_present_staging(VulkanState &s, VkDeviceSize bytes, std::string &error) {
+    if (bytes == 0u) return true;
+    if (s.present_staging_mapped != nullptr && s.present_staging_bytes >= bytes) return true;
+    if (s.submit_pending) {
+        error = "present staging is still in use";
+        return false;
+    }
+    if (s.present_staging_mapped != nullptr) vkUnmapMemory(s.device, s.present_staging_memory);
+    if (s.present_staging != VK_NULL_HANDLE) vkDestroyBuffer(s.device, s.present_staging, nullptr);
+    if (s.present_staging_memory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.present_staging_memory, nullptr);
+    s.present_staging = VK_NULL_HANDLE;
+    s.present_staging_memory = VK_NULL_HANDLE;
+    s.present_staging_mapped = nullptr;
+    s.present_staging_bytes = 0u;
+    void *mapped = nullptr;
+    const VkMemoryPropertyFlags host =
+        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    if (!create_buffer(s, bytes, VK_BUFFER_USAGE_TRANSFER_SRC_BIT, host, s.present_staging,
+                       s.present_staging_memory, &mapped, error))
+        return false;
+    s.present_staging_mapped = mapped;
+    s.present_staging_bytes = bytes;
+    return true;
+}
+
+bool ensure_overlay_image(VulkanState &s, GpuImage &image, std::uint32_t width, std::uint32_t height,
+                          std::string &error) {
+    if (image.image != VK_NULL_HANDLE && image.width == width && image.height == height) return true;
+    destroy_image(s, image);
+    return create_image(s, image, width, height, 1u, VK_FORMAT_R8G8B8A8_UNORM,
+                        VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                        VK_IMAGE_ASPECT_COLOR_BIT, error);
+}
+
+bool ensure_game_sampler(VulkanState &s, std::string &error) {
+    const bool linear =
+        lcs_render_configuration().display.upscale_filter == DisplayUpscaleFilter::Bilinear;
+    if (s.game_sampler != VK_NULL_HANDLE && s.game_sampler_linear == linear) return true;
+    if (s.submit_pending) {
+        error = "present sampler is still in use";
+        return false;
+    }
+    if (s.game_sampler != VK_NULL_HANDLE) vkDestroySampler(s.device, s.game_sampler, nullptr);
+    s.game_sampler = make_present_sampler(s, linear);
+    s.game_sampler_linear = linear;
+    if (s.game_sampler == VK_NULL_HANDLE) {
+        error = "Vulkan present sampler failed";
+        return false;
+    }
+    return true;
+}
+
+void write_present_set(VulkanState &s, std::size_t slot, VkImageView view, VkSampler sampler) {
+    if (slot >= s.present_sets.size() || s.present_sets[slot] == VK_NULL_HANDLE ||
+        view == VK_NULL_HANDLE || sampler == VK_NULL_HANDLE)
+        return;
+    VkDescriptorImageInfo info{};
+    info.sampler = sampler;
+    info.imageView = view;
+    info.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    VkWriteDescriptorSet write{};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = s.present_sets[slot];
+    write.descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    write.descriptorCount = 1u;
+    write.pImageInfo = &info;
+    vkUpdateDescriptorSets(s.device, 1u, &write, 0u, nullptr);
+}
+
+void cmd_upload_image(VulkanState &s, GpuImage &image, VkDeviceSize offset, std::uint32_t width,
+                      std::uint32_t height) {
+    VkMemoryBarrier host{};
+    host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
+    host.srcAccessMask = VK_ACCESS_HOST_WRITE_BIT;
+    host.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+    vkCmdPipelineBarrier(s.command, VK_PIPELINE_STAGE_HOST_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0u, 1u,
+                         &host, 0u, nullptr, 0u, nullptr);
+    transition_image(s.command, image.image, image.layout, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1u);
+    VkBufferImageCopy region{};
+    region.bufferOffset = offset;
+    region.imageSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
+    region.imageSubresource.layerCount = 1u;
+    region.imageExtent = {width, height, 1u};
+    vkCmdCopyBufferToImage(s.command, s.present_staging, image.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1u, &region);
+    transition_image(s.command, image.image, image.layout, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1u);
+}
+
+void draw_present_layer(VulkanState &s, VkDescriptorSet set, std::int32_t x, std::int32_t y,
+                        std::int32_t width, std::int32_t height, bool opaque) {
+    if (set == VK_NULL_HANDLE || width <= 0 || height <= 0) return;
+    if (x < 0) {
+        width += x;
+        x = 0;
+    }
+    if (y < 0) {
+        height += y;
+        y = 0;
+    }
+    if (width <= 0 || height <= 0 || x >= static_cast<std::int32_t>(s.swap_width) ||
+        y >= static_cast<std::int32_t>(s.swap_height))
+        return;
+    width = std::min(width, static_cast<std::int32_t>(s.swap_width) - x);
+    height = std::min(height, static_cast<std::int32_t>(s.swap_height) - y);
+    VkViewport viewport{};
+    viewport.x = static_cast<float>(x);
+    viewport.y = static_cast<float>(y);
+    viewport.width = static_cast<float>(width);
+    viewport.height = static_cast<float>(height);
+    viewport.maxDepth = 1.0f;
+    VkRect2D scissor{};
+    scissor.offset = {x, y};
+    scissor.extent = {static_cast<std::uint32_t>(width), static_cast<std::uint32_t>(height)};
+    vkCmdSetViewport(s.command, 0u, 1u, &viewport);
+    vkCmdSetScissor(s.command, 0u, 1u, &scissor);
+    const std::uint32_t opaque_flag = opaque ? 1u : 0u;
+    vkCmdPushConstants(s.command, s.present_layout, VK_SHADER_STAGE_FRAGMENT_BIT, 0u, sizeof(opaque_flag),
+                       &opaque_flag);
+    vkCmdBindDescriptorSets(s.command, VK_PIPELINE_BIND_POINT_GRAPHICS, s.present_layout, 0u, 1u, &set, 0u,
+                            nullptr);
+    vkCmdDraw(s.command, 3u, 1u, 0u, 0u);
+}
+
+void cmd_present_pass(VulkanState &s, std::uint32_t image_index, VkDescriptorSet source,
+                      std::uint32_t source_width, std::uint32_t source_height, bool draw_fps,
+                      bool draw_settings) {
+    const DisplayConfiguration &display = lcs_render_configuration().display;
+    const PresentationRectangle fitted = calculate_presentation_rectangle(
+        s.swap_width, s.swap_height, source_width, source_height, display.aspect_mode,
+        display.integer_scale);
+    VkClearValue clear{};
+    clear.color.float32[3] = 1.0f;
+    VkRenderPassBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
+    begin.renderPass = s.present_pass;
+    begin.framebuffer = s.swap_framebuffers[image_index];
+    begin.renderArea.extent = {s.swap_width, s.swap_height};
+    begin.clearValueCount = 1u;
+    begin.pClearValues = &clear;
+    vkCmdBeginRenderPass(s.command, &begin, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(s.command, VK_PIPELINE_BIND_POINT_GRAPHICS, s.present_pipeline);
+    draw_present_layer(s, source, fitted.x, fitted.y, fitted.width, fitted.height, true);
+    if (draw_fps) {
+        const std::int32_t panel_h = std::max(28, static_cast<std::int32_t>(s.swap_height / 28u));
+        const std::int32_t panel_w = panel_h * static_cast<std::int32_t>(kFpsOverlayWidth / kFpsOverlayHeight);
+        draw_present_layer(s, s.present_sets[kPresentFps], 16, 16, panel_w, panel_h, false);
+    }
+    if (draw_settings) {
+        const std::int32_t panel_w = std::min(static_cast<std::int32_t>(static_cast<float>(s.swap_width) * 0.46f),
+                                              static_cast<std::int32_t>(kSettingsOverlayWidth));
+        const std::int32_t panel_h = panel_w / 2;
+        draw_present_layer(s, s.present_sets[kPresentSettings],
+                           static_cast<std::int32_t>(s.swap_width) - panel_w - 24, 24, panel_w, panel_h, false);
+    }
+    vkCmdEndRenderPass(s.command);
+}
+
+bool acquire_swap_image(VulkanState &s, std::uint32_t &index, std::string &error) {
+    VkResult result = vkAcquireNextImageKHR(s.device, s.swapchain, 1000000000ull, s.acquire_semaphore,
+                                            VK_NULL_HANDLE, &index);
+    if (result == VK_ERROR_OUT_OF_DATE_KHR) {
+        s.swapchain_dirty = true;
+        if (!ensure_swapchain(s, error)) return false;
+        result = vkAcquireNextImageKHR(s.device, s.swapchain, 1000000000ull, s.acquire_semaphore,
+                                       VK_NULL_HANDLE, &index);
+    }
+    if (result != VK_SUCCESS && result != VK_SUBOPTIMAL_KHR) {
+        error = "vkAcquireNextImageKHR failed";
+        return false;
+    }
+    return true;
+}
+
+void retire_acquired_present(VulkanState &s) noexcept {
+    if (s.device != VK_NULL_HANDLE) vkDeviceWaitIdle(s.device);
+    s.present_recorded = false;
+    if (s.device != VK_NULL_HANDLE && s.acquire_semaphore != VK_NULL_HANDLE) {
+        // Submit never waited, so this acquire semaphore stays signaled.
+        vkDestroySemaphore(s.device, s.acquire_semaphore, nullptr);
+        s.acquire_semaphore = VK_NULL_HANDLE;
+        VkSemaphoreCreateInfo semaphore{};
+        semaphore.sType = VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO;
+        vkCreateSemaphore(s.device, &semaphore, nullptr, &s.acquire_semaphore);
+    }
+    s.swapchain_dirty = true;
+    std::string ignored;
+    ensure_swapchain(s, ignored);
+}
+
+bool prepare_overlay_uploads(VulkanState &s, const Dx12FramePresentDecision &decision,
+                             VkDeviceSize fps_offset, VkDeviceSize settings_offset, bool &draw_fps,
+                             bool &draw_settings, std::string &error) {
+    draw_fps = false;
+    draw_settings = false;
+    auto *mapped = static_cast<std::uint8_t *>(s.present_staging_mapped);
+    if (mapped == nullptr) return false;
+    if (decision.composite_fps &&
+        ensure_overlay_image(s, s.fps_overlay, kFpsOverlayWidth, kFpsOverlayHeight, error)) {
+        rasterize_fps_overlay(mapped + fps_offset, kFpsOverlayWidth, kFpsOverlayHeight);
+        draw_fps = true;
+    }
+    if (decision.composite_settings &&
+        ensure_overlay_image(s, s.settings_overlay, kSettingsOverlayWidth, kSettingsOverlayHeight, error)) {
+        rasterize_settings_overlay(decision.settings, mapped + settings_offset, kSettingsOverlayWidth,
+                                   kSettingsOverlayHeight);
+        draw_settings = true;
+    }
+    return true;
+}
+
+bool record_swapchain_present(VulkanState &s, VkImageView source, std::uint32_t source_width,
+                              std::uint32_t source_height, std::string &error) {
+    if (source == VK_NULL_HANDLE || s.present_lost) return false;
+    if (!ensure_swapchain(s, error) || !ensure_game_sampler(s, error)) return false;
+    const Dx12FramePresentDecision decision = decide_dx12_frame_present(true);
+    const VkDeviceSize fps_bytes = static_cast<VkDeviceSize>(kFpsOverlayWidth) * kFpsOverlayHeight * 4u;
+    const VkDeviceSize settings_bytes =
+        static_cast<VkDeviceSize>(kSettingsOverlayWidth) * kSettingsOverlayHeight * 4u;
+    const VkDeviceSize fps_offset = 0u;
+    const VkDeviceSize settings_offset = align_upload(fps_bytes);
+    if (!ensure_present_staging(s, settings_offset + settings_bytes, error)) return false;
+    host_fps_note_presented_frame();
+    bool draw_fps = false;
+    bool draw_settings = false;
+    if (!prepare_overlay_uploads(s, decision, fps_offset, settings_offset, draw_fps, draw_settings, error))
+        return false;
+    std::uint32_t index = 0u;
+    if (!acquire_swap_image(s, index, error)) return false;
+    if (draw_fps)
+        cmd_upload_image(s, s.fps_overlay, fps_offset, kFpsOverlayWidth, kFpsOverlayHeight);
+    if (draw_settings)
+        cmd_upload_image(s, s.settings_overlay, settings_offset, kSettingsOverlayWidth, kSettingsOverlayHeight);
+    write_present_set(s, kPresentGame, source, s.game_sampler);
+    if (draw_fps) write_present_set(s, kPresentFps, s.fps_overlay.view, s.overlay_sampler);
+    if (draw_settings) write_present_set(s, kPresentSettings, s.settings_overlay.view, s.overlay_sampler);
+    cmd_present_pass(s, index, s.present_sets[kPresentGame], source_width, source_height, draw_fps,
+                     draw_settings);
+    s.present_image_index = index;
+    s.present_recorded = true;
+    return true;
+}
+
+VkResult queue_present(VulkanState &s) {
+    if (s.present_image_index >= s.present_semaphores.size()) return VK_ERROR_OUT_OF_DATE_KHR;
+    VkSemaphore wait = s.present_semaphores[s.present_image_index];
+    VkPresentInfoKHR info{};
+    info.sType = VK_STRUCTURE_TYPE_PRESENT_INFO_KHR;
+    info.waitSemaphoreCount = 1u;
+    info.pWaitSemaphores = &wait;
+    info.swapchainCount = 1u;
+    info.pSwapchains = &s.swapchain;
+    info.pImageIndices = &s.present_image_index;
+    s.present_recorded = false;
+    return vkQueuePresentKHR(s.queue, &info);
+}
+
+void log_frame_failure(const VulkanState &s, const char *step, VkResult result) noexcept {
+    static std::uint64_t failures = 0u;
+    ++failures;
+    if (failures > 5u && (failures % 300u) != 0u) return;
+    std::cerr << "[vulkan] " << step << " result=" << static_cast<int>(result)
+              << " failures=" << failures
+              << " batches=" << s.batches.size()
+              << " textures=" << s.textures.size()
+              << " descriptor_sets=" << s.descriptor_sets_live
+              << " staging=" << s.staging.size()
+              << " display_fb=" << std::hex << s.display_framebuffer << std::dec << '\n';
+}
+
+void release_staging(VulkanState &s) noexcept {
+    for (Staging &staging : s.staging) {
+        vkDestroyBuffer(s.device, staging.buffer, nullptr);
+        vkFreeMemory(s.device, staging.memory, nullptr);
+    }
+    s.staging.clear();
+}
+
+bool complete_pending_submit(VulkanState &s, bool &copied) noexcept {
+    copied = false;
+    if (!s.submit_pending) return true;
+    const VkResult waited = vkQueueWaitIdle(s.queue);
+    if (waited != VK_SUCCESS) {
+        log_frame_failure(s, "vkQueueWaitIdle", waited);
+        return false;
+    }
+    if (s.pending_readback && s.readback_mapped != nullptr && s.pending_readback_bytes != 0u) {
+        s.frame_rgba.resize(s.pending_readback_bytes);
+        std::memcpy(s.frame_rgba.data(), s.readback_mapped, s.pending_readback_bytes);
+        copied = true;
+        s.readback_latched = true;
+    }
+    release_staging(s);
+    s.submit_pending = false;
+    s.pending_readback = false;
+    s.pending_readback_bytes = 0u;
+    return true;
+}
+
+bool present_guest_image(VulkanState &s, std::span<const std::byte> rgba, std::uint32_t width,
+                         std::uint32_t height, std::string &error) {
+    if (s.present_lost || s.swapchain == VK_NULL_HANDLE && !s.swapchain_extension) return false;
+    if (width == 0u || height == 0u || width > 8192u || height > 8192u) return false;
+    const std::size_t guest_bytes = static_cast<std::size_t>(width) * height * 4u;
+    if (rgba.size() < guest_bytes) return false;
+    bool copied = false;
+    if (!complete_pending_submit(s, copied)) return false;
+    if (!ensure_swapchain(s, error) || !ensure_game_sampler(s, error)) return false;
+    if (!ensure_overlay_image(s, s.guest_image, width, height, error)) return false;
+    const Dx12FramePresentDecision decision = decide_dx12_frame_present(true);
+    const VkDeviceSize fps_bytes = static_cast<VkDeviceSize>(kFpsOverlayWidth) * kFpsOverlayHeight * 4u;
+    const VkDeviceSize settings_bytes =
+        static_cast<VkDeviceSize>(kSettingsOverlayWidth) * kSettingsOverlayHeight * 4u;
+    const VkDeviceSize fps_offset = align_upload(static_cast<VkDeviceSize>(guest_bytes));
+    const VkDeviceSize settings_offset = align_upload(fps_offset + fps_bytes);
+    if (!ensure_present_staging(s, settings_offset + settings_bytes, error)) return false;
+    std::memcpy(s.present_staging_mapped, rgba.data(), guest_bytes);
+    host_fps_note_presented_frame();
+    bool draw_fps = false;
+    bool draw_settings = false;
+    if (!prepare_overlay_uploads(s, decision, fps_offset, settings_offset, draw_fps, draw_settings, error))
+        return false;
+    std::uint32_t index = 0u;
+    if (!acquire_swap_image(s, index, error)) return false;
+    VkCommandBufferBeginInfo begin{};
+    begin.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO;
+    begin.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
+    if (vkResetCommandBuffer(s.command, 0u) != VK_SUCCESS ||
+        vkBeginCommandBuffer(s.command, &begin) != VK_SUCCESS) {
+        retire_acquired_present(s);
+        error = "Vulkan guest present could not begin a command buffer";
+        return false;
+    }
+    cmd_upload_image(s, s.guest_image, 0u, width, height);
+    if (draw_fps) cmd_upload_image(s, s.fps_overlay, fps_offset, kFpsOverlayWidth, kFpsOverlayHeight);
+    if (draw_settings)
+        cmd_upload_image(s, s.settings_overlay, settings_offset, kSettingsOverlayWidth, kSettingsOverlayHeight);
+    write_present_set(s, kPresentGuest, s.guest_image.view, s.game_sampler);
+    if (draw_fps) write_present_set(s, kPresentFps, s.fps_overlay.view, s.overlay_sampler);
+    if (draw_settings) write_present_set(s, kPresentSettings, s.settings_overlay.view, s.overlay_sampler);
+    cmd_present_pass(s, index, s.present_sets[kPresentGuest], width, height, draw_fps, draw_settings);
+    if (vkEndCommandBuffer(s.command) != VK_SUCCESS) {
+        vkResetCommandBuffer(s.command, 0u);
+        retire_acquired_present(s);
+        error = "Vulkan guest present command buffer failed";
+        return false;
+    }
+    if (index >= s.present_semaphores.size()) {
+        vkResetCommandBuffer(s.command, 0u);
+        retire_acquired_present(s);
+        error = "Vulkan guest present semaphore is missing";
+        return false;
+    }
+    VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+    VkSemaphore acquire_wait = s.acquire_semaphore;
+    VkSemaphore present_signal = s.present_semaphores[index];
+    VkSubmitInfo submit{};
+    submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+    submit.waitSemaphoreCount = 1u;
+    submit.pWaitSemaphores = &acquire_wait;
+    submit.pWaitDstStageMask = &wait_stage;
+    submit.commandBufferCount = 1u;
+    submit.pCommandBuffers = &s.command;
+    submit.signalSemaphoreCount = 1u;
+    submit.pSignalSemaphores = &present_signal;
+    s.present_image_index = index;
+    s.present_recorded = true;
+    if (vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE) != VK_SUCCESS) {
+        vkResetCommandBuffer(s.command, 0u);
+        retire_acquired_present(s);
+        error = "Vulkan guest present submit failed";
+        return false;
+    }
+    const VkResult presented = queue_present(s);
+    vkQueueWaitIdle(s.queue);
+    vkResetCommandBuffer(s.command, 0u);
+    if (presented == VK_ERROR_OUT_OF_DATE_KHR) s.swapchain_dirty = true;
+    if (presented == VK_ERROR_DEVICE_LOST) s.present_lost = true;
+    if (presented != VK_SUCCESS && presented != VK_SUBOPTIMAL_KHR) {
+        error = "vkQueuePresentKHR failed";
+        return false;
+    }
+    return true;
+}
+
 void destroy_backend(VulkanState &s) noexcept {
     if (s.device != VK_NULL_HANDLE) vkDeviceWaitIdle(s.device);
+    destroy_present_device(s);
     for (Staging &staging : s.staging) {
         if (staging.buffer) vkDestroyBuffer(s.device, staging.buffer, nullptr);
         if (staging.memory) vkFreeMemory(s.device, staging.memory, nullptr);
     }
     s.staging.clear();
+    s.submit_pending = false;
+    s.pending_readback = false;
+    s.pending_readback_bytes = 0u;
+    s.readback_latched = false;
     for (auto &entry : s.targets) destroy_target(s, entry.second);
     s.targets.clear();
     for (auto &entry : s.textures) destroy_image(s, entry.second.gpu);
@@ -1115,6 +2161,8 @@ void destroy_backend(VulkanState &s) noexcept {
             destroy_messenger(s.instance, s.debug_messenger, nullptr);
     }
     s.debug_messenger = VK_NULL_HANDLE;
+    // After the device, before the instance.
+    destroy_surface(s);
     if (s.instance) vkDestroyInstance(s.instance, nullptr);
     s.geometry = s.uniforms = s.readback = VK_NULL_HANDLE;
     s.geometry_memory = s.uniform_memory = s.readback_memory = VK_NULL_HANDLE;
@@ -1128,6 +2176,7 @@ void destroy_backend(VulkanState &s) noexcept {
     s.device = VK_NULL_HANDLE;
     s.debug_messenger = VK_NULL_HANDLE;
     s.instance = VK_NULL_HANDLE;
+    s.swapchain_extension = false;
     s.enabled = false;
     s.pass_open = false;
     s.current_target = nullptr;
@@ -1283,6 +2332,23 @@ bool create_backend(VulkanState &s, std::string &error) {
     const bool enable_validation = validation != nullptr && *validation != '\0' && *validation != '0';
     const char *layer = "VK_LAYER_KHRONOS_validation";
     const char *debug_extension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
+    std::vector<const char *> instance_extensions;
+    bool sdl_surface_extensions = false;
+    if (s.window != nullptr && (SDL_GetWindowFlags(s.window) & SDL_WINDOW_VULKAN) != 0u) {
+        unsigned int sdl_count = 0u;
+        if (SDL_Vulkan_GetInstanceExtensions(s.window, &sdl_count, nullptr) == SDL_TRUE && sdl_count > 0u) {
+            instance_extensions.resize(sdl_count);
+            if (SDL_Vulkan_GetInstanceExtensions(s.window, &sdl_count, instance_extensions.data()) == SDL_TRUE) {
+                instance_extensions.resize(sdl_count);
+                sdl_surface_extensions = true;
+            } else {
+                instance_extensions.clear();
+            }
+        }
+        if (!sdl_surface_extensions)
+            std::cerr << "[vulkan] SDL_Vulkan_GetInstanceExtensions failed: " << SDL_GetError()
+                      << "; using the CPU readback\n";
+    }
     VkDebugUtilsMessengerCreateInfoEXT messenger_info{};
     messenger_info.sType = VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT;
     messenger_info.messageSeverity = VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT |
@@ -1292,11 +2358,18 @@ bool create_backend(VulkanState &s, std::string &error) {
                                  VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT;
     messenger_info.pfnUserCallback = vulkan_validation_message;
     if (enable_validation) {
+        bool have_debug = false;
+        for (const char *name : instance_extensions) {
+            if (std::strcmp(name, debug_extension) == 0) have_debug = true;
+        }
+        if (!have_debug) instance_extensions.push_back(debug_extension);
         instance_info.enabledLayerCount = 1u;
         instance_info.ppEnabledLayerNames = &layer;
-        instance_info.enabledExtensionCount = 1u;
-        instance_info.ppEnabledExtensionNames = &debug_extension;
         instance_info.pNext = &messenger_info;
+    }
+    if (!instance_extensions.empty()) {
+        instance_info.enabledExtensionCount = static_cast<std::uint32_t>(instance_extensions.size());
+        instance_info.ppEnabledExtensionNames = instance_extensions.data();
     }
     if (vkCreateInstance(&instance_info, nullptr, &s.instance) != VK_SUCCESS) {
         error = "vkCreateInstance failed";
@@ -1313,40 +2386,12 @@ bool create_backend(VulkanState &s, std::string &error) {
         }
         std::cerr << "[vulkan] validation layer enabled\n";
     }
-    std::uint32_t device_count = 0u;
-    vkEnumeratePhysicalDevices(s.instance, &device_count, nullptr);
-    if (device_count == 0u) {
-        error = "No Vulkan physical device";
-        return false;
+    if (sdl_surface_extensions) {
+        std::string surface_error;
+        if (!create_window_surface(s, surface_error))
+            std::cerr << "[vulkan] " << surface_error << "; using the CPU readback\n";
     }
-    std::vector<VkPhysicalDevice> devices(device_count);
-    vkEnumeratePhysicalDevices(s.instance, &device_count, devices.data());
-    s.report.physical_device_count = device_count;
-    s.physical = devices.front();
-    for (VkPhysicalDevice candidate : devices) {
-        VkPhysicalDeviceProperties properties{};
-        vkGetPhysicalDeviceProperties(candidate, &properties);
-        if (properties.deviceType == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU) {
-            s.physical = candidate;
-            break;
-        }
-    }
-    std::uint32_t family_count = 0u;
-    vkGetPhysicalDeviceQueueFamilyProperties(s.physical, &family_count, nullptr);
-    std::vector<VkQueueFamilyProperties> families(family_count);
-    vkGetPhysicalDeviceQueueFamilyProperties(s.physical, &family_count, families.data());
-    s.queue_family = 0xFFFFFFFFu;
-    for (std::uint32_t index = 0u; index < family_count; ++index) {
-        if ((families[index].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0u) {
-            s.queue_family = index;
-            break;
-        }
-    }
-    if (s.queue_family == 0xFFFFFFFFu) {
-        error = "No Vulkan graphics queue";
-        return false;
-    }
-    s.report.graphics_queue_family = s.queue_family;
+    if (!select_present_device(s, error)) return false;
     VkPhysicalDeviceProperties device_properties{};
     vkGetPhysicalDeviceProperties(s.physical, &device_properties);
     s.uniform_align = std::max<std::uint32_t>(
@@ -1366,11 +2411,21 @@ bool create_backend(VulkanState &s, std::string &error) {
         s.sampler_anisotropy = true;
         s.max_sampler_anisotropy = std::max(1.0f, device_properties.limits.maxSamplerAnisotropy);
     }
+    s.swapchain_extension = s.surface != VK_NULL_HANDLE && device_has_swapchain(s.physical);
+    const char *swapchain_extension = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+    if (s.surface != VK_NULL_HANDLE && !s.swapchain_extension) {
+        std::cerr << "[vulkan] device has no swapchain extension; using the CPU readback\n";
+        destroy_surface(s);
+    }
     VkDeviceCreateInfo device_info{};
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
     device_info.queueCreateInfoCount = 1u;
     device_info.pQueueCreateInfos = &queue_info;
     device_info.pEnabledFeatures = &enabled_features;
+    if (s.swapchain_extension) {
+        device_info.enabledExtensionCount = 1u;
+        device_info.ppEnabledExtensionNames = &swapchain_extension;
+    }
     if (vkCreateDevice(s.physical, &device_info, nullptr, &s.device) != VK_SUCCESS) {
         error = "vkCreateDevice failed";
         return false;
@@ -1501,15 +2556,12 @@ bool create_backend(VulkanState &s, std::string &error) {
 
     const VkDeviceSize geometry_size = kGeometryUploadCapacity;
     const VkDeviceSize uniform_size = static_cast<VkDeviceSize>(kMaxDraws) * s.uniform_align;
-    const VkDeviceSize readback_size = static_cast<VkDeviceSize>(s.target_width) * s.target_height * 4u;
     const VkMemoryPropertyFlags host = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     if (!create_buffer(s, geometry_size,
                        VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT,
                        host, s.geometry, s.geometry_memory, &s.geometry_mapped, error) ||
         !create_buffer(s, uniform_size, VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT, host,
-                       s.uniforms, s.uniform_memory, &s.uniform_mapped, error) ||
-        !create_buffer(s, readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host,
-                       s.readback, s.readback_memory, &s.readback_mapped, error, true))
+                       s.uniforms, s.uniform_memory, &s.uniform_mapped, error))
         return false;
     s.report.transfer_buffer_created = true;
     s.report.transfer_memory_mapped = true;
@@ -1562,7 +2614,23 @@ bool create_backend(VulkanState &s, std::string &error) {
     if (!write_descriptor(s, s.white.gpu, error)) return false;
     s.report.transfer_self_test_passed = true;
     if (!run_offscreen_self_test(s, error)) return false;
-    s.report.frames_in_flight_capacity = 1u;
+    if (s.surface != VK_NULL_HANDLE && s.swapchain_extension) {
+        std::string present_error;
+        if (!ensure_swapchain(s, present_error) || s.swapchain == VK_NULL_HANDLE) {
+            std::cerr << "[vulkan] " << (present_error.empty() ? "swapchain unavailable" : present_error)
+                      << "; using the CPU readback\n";
+            destroy_present_device(s);
+            destroy_surface(s);
+        }
+    }
+    if (s.swapchain == VK_NULL_HANDLE) {
+        const VkDeviceSize readback_size = static_cast<VkDeviceSize>(s.target_width) * s.target_height * 4u;
+        if (!create_buffer(s, readback_size, VK_BUFFER_USAGE_TRANSFER_DST_BIT, host,
+                           s.readback, s.readback_memory, &s.readback_mapped, error, true))
+            return false;
+        std::cerr << "[vulkan] frame readback " << (readback_size / (1024u * 1024u)) << " MiB\n";
+    }
+    s.report.frames_in_flight_capacity = 2u;
     s.vertices.reserve(1u << 16u);
     return true;
 }
@@ -1913,7 +2981,51 @@ bool ge_gpu_backend_accumulate_hardware_packed_0115(
     return true;
 }
 
-void ge_gpu_backend_set_native_window(void *) noexcept {}
+void ge_gpu_backend_set_native_window(void *native) noexcept {
+    VulkanState &s = state();
+    std::lock_guard<std::recursive_mutex> guard(s.mutex);
+    auto *window = static_cast<SDL_Window *>(native);
+    if (window == s.window && s.swapchain != VK_NULL_HANDLE) return;
+    const bool window_changed = window != s.window;
+    s.window = window;
+    if (s.device == VK_NULL_HANDLE) return;
+    if (window_changed && (s.swapchain != VK_NULL_HANDLE || s.surface != VK_NULL_HANDLE)) {
+        vkDeviceWaitIdle(s.device);
+        destroy_present_device(s);
+        destroy_surface(s);
+    }
+    if (window == nullptr || !s.swapchain_extension || s.swapchain != VK_NULL_HANDLE) return;
+    std::string error;
+    if (!create_window_surface(s, error)) {
+        std::cerr << "[vulkan] " << error << "; using the CPU readback\n";
+        return;
+    }
+    VkBool32 supported = VK_FALSE;
+    if (vkGetPhysicalDeviceSurfaceSupportKHR(s.physical, s.queue_family, s.surface, &supported) != VK_SUCCESS ||
+        supported != VK_TRUE) {
+        std::cerr << "[vulkan] graphics queue cannot present; using the CPU readback\n";
+        destroy_surface(s);
+        return;
+    }
+    if (!ensure_swapchain(s, error) || s.swapchain == VK_NULL_HANDLE) {
+        std::cerr << "[vulkan] " << (error.empty() ? "swapchain unavailable" : error)
+                  << "; using the CPU readback\n";
+        destroy_present_device(s);
+        destroy_surface(s);
+        return;
+    }
+    // The swapchain replaced this copy.
+    if (!s.submit_pending && s.readback != VK_NULL_HANDLE) {
+        if (s.readback_mapped != nullptr) vkUnmapMemory(s.device, s.readback_memory);
+        vkDestroyBuffer(s.device, s.readback, nullptr);
+        if (s.readback_memory != VK_NULL_HANDLE) vkFreeMemory(s.device, s.readback_memory, nullptr);
+        s.readback = VK_NULL_HANDLE;
+        s.readback_memory = VK_NULL_HANDLE;
+        s.readback_mapped = nullptr;
+        s.pending_readback = false;
+        s.pending_readback_bytes = 0u;
+    }
+}
 
 void ge_gpu_backend_set_display_framebuffer(std::uint32_t address, std::uint32_t logical_width,
                                             std::uint32_t logical_height) noexcept {
@@ -1935,28 +3047,29 @@ void ge_gpu_backend_display_logical_size(std::uint32_t &width, std::uint32_t &he
     height = s.display_logical_height;
 }
 
-void log_frame_failure(const VulkanState &s, const char *step, VkResult result) noexcept {
-    static std::uint64_t failures = 0u;
-    ++failures;
-    if (failures > 5u && (failures % 300u) != 0u) return;
-    std::cerr << "[vulkan] " << step << " result=" << static_cast<int>(result)
-              << " failures=" << failures
-              << " batches=" << s.batches.size()
-              << " textures=" << s.textures.size()
-              << " descriptor_sets=" << s.descriptor_sets_live
-              << " staging=" << s.staging.size()
-              << " display_fb=" << std::hex << s.display_framebuffer << std::dec << '\n';
-}
-
 bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     VulkanState &s = state();
     std::lock_guard<std::recursive_mutex> guard(s.mutex);
-    if (!s.enabled || s.batches.empty()) {
+    const bool publish = ge_finish_shows_this_frame();
+    bool copied_previous = false;
+    const auto shown = [&]() {
+        const bool show = copied_previous || s.readback_latched;
+        if (publish) s.readback_latched = false;
+        return show;
+    };
+    if (s.enabled && !complete_pending_submit(s, copied_previous)) {
         s.vertices.clear();
         s.indices.clear();
         s.batches.clear();
         ++s.frame_epoch;
         return false;
+    }
+    if (!s.enabled || s.batches.empty()) {
+        s.vertices.clear();
+        s.indices.clear();
+        s.batches.clear();
+        ++s.frame_epoch;
+        return shown();
     }
     std::string error;
     const std::size_t vertex_bytes = s.vertices.size() * sizeof(UploadVertex);
@@ -1968,7 +3081,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         s.indices.clear();
         s.batches.clear();
         ++s.frame_epoch;
-        return false;
+        return shown();
     }
     if (s.geometry_mapped != nullptr) {
         if (!s.vertices.empty())
@@ -1987,7 +3100,7 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
         s.vertices.clear();
         s.indices.clear();
         s.batches.clear();
-        return false;
+        return shown();
     }
     VkMemoryBarrier host{};
     host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -2155,7 +3268,19 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     end_pass(s);
     Target *display = find_target(s, s.display_framebuffer);
     const bool display_ready = touched_display && display != nullptr && display->color.image != VK_NULL_HANDLE;
-    if (display_ready) {
+    bool present_this_frame = false;
+    if (publish && display_ready && s.swapchain_extension && !s.present_lost) {
+        if (display->color.layout != VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL) {
+            transition_image(s.command, display->color.image, display->color.layout,
+                             VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1u);
+        }
+        std::string present_error;
+        if (record_swapchain_present(s, display->color.view, s.target_width, s.target_height, present_error))
+            present_this_frame = true;
+        else if (!present_error.empty())
+            log_frame_failure(s, present_error.c_str(), VK_ERROR_SURFACE_LOST_KHR);
+    }
+    if (publish && display_ready && !present_this_frame && s.readback != VK_NULL_HANDLE) {
         transition_image(s.command, display->color.image, display->color.layout,
                          VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_ASPECT_COLOR_BIT, 1u);
         VkBufferImageCopy copy{};
@@ -2169,46 +3294,86 @@ bool ge_gpu_backend_finish_color_frame(std::uint64_t vblank) noexcept {
     }
     const VkResult ended = vkEndCommandBuffer(s.command);
     if (ended != VK_SUCCESS) log_frame_failure(s, "vkEndCommandBuffer", ended);
-    bool readback = false;
+    bool submitted = false;
+    bool presented_now = false;
     if (ended == VK_SUCCESS) {
+        VkPipelineStageFlags wait_stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
+        VkSemaphore acquire_wait = s.acquire_semaphore;
+        VkSemaphore present_signal = VK_NULL_HANDLE;
+        if (present_this_frame && s.present_image_index < s.present_semaphores.size())
+            present_signal = s.present_semaphores[s.present_image_index];
         VkSubmitInfo submit{};
         submit.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
         submit.commandBufferCount = 1u;
         submit.pCommandBuffers = &s.command;
-        const VkResult queued = vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE);
-        if (queued != VK_SUCCESS) log_frame_failure(s, "vkQueueSubmit", queued);
-        const VkResult waited = queued == VK_SUCCESS ? vkQueueWaitIdle(s.queue) : queued;
-        if (queued == VK_SUCCESS && waited != VK_SUCCESS) log_frame_failure(s, "vkQueueWaitIdle", waited);
-        if (queued == VK_SUCCESS && waited == VK_SUCCESS && display_ready && s.readback_mapped != nullptr) {
-            const std::size_t row = static_cast<std::size_t>(s.target_width) * 4u;
-            s.frame_rgba.resize(row * s.target_height);
-            std::memcpy(s.frame_rgba.data(), s.readback_mapped, s.frame_rgba.size());
-            readback = true;
-        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && !display_ready) {
-            log_frame_failure(s, "display target was not drawn", VK_SUCCESS);
-        } else if (queued == VK_SUCCESS && waited == VK_SUCCESS && s.readback_mapped == nullptr) {
-            log_frame_failure(s, "readback memory is not mapped", VK_ERROR_MEMORY_MAP_FAILED);
+        if (present_this_frame && present_signal == VK_NULL_HANDLE) {
+            log_frame_failure(s, "Vulkan present semaphore is missing", VK_ERROR_OUT_OF_DATE_KHR);
+        } else {
+            if (present_this_frame) {
+                submit.waitSemaphoreCount = 1u;
+                submit.pWaitSemaphores = &acquire_wait;
+                submit.pWaitDstStageMask = &wait_stage;
+                submit.signalSemaphoreCount = 1u;
+                submit.pSignalSemaphores = &present_signal;
+            }
+            const VkResult queued = vkQueueSubmit(s.queue, 1u, &submit, VK_NULL_HANDLE);
+            if (queued != VK_SUCCESS) {
+                log_frame_failure(s, "vkQueueSubmit", queued);
+            } else {
+                // The next finish waits, so this GPU work overlaps the next list.
+                submitted = true;
+                s.submit_pending = true;
+                if (present_this_frame) {
+                    const VkResult presented = queue_present(s);
+                    if (presented == VK_SUCCESS || presented == VK_SUBOPTIMAL_KHR) {
+                        presented_now = true;
+                        s.direct_present_ok = true;
+                    } else if (presented == VK_ERROR_OUT_OF_DATE_KHR) {
+                        s.swapchain_dirty = true;
+                    } else if (presented == VK_ERROR_DEVICE_LOST) {
+                        s.present_lost = true;
+                        log_frame_failure(s, "vkQueuePresentKHR", presented);
+                    } else {
+                        log_frame_failure(s, "vkQueuePresentKHR", presented);
+                    }
+                    s.pending_readback = false;
+                    s.pending_readback_bytes = 0u;
+                } else {
+                    s.pending_readback = publish && display_ready && s.readback_mapped != nullptr;
+                    s.pending_readback_bytes = s.pending_readback
+                        ? static_cast<std::size_t>(s.target_width) * s.target_height * 4u : 0u;
+                    if (publish && !display_ready)
+                        log_frame_failure(s, "display target was not drawn", VK_SUCCESS);
+                    else if (publish && display_ready && s.swapchain == VK_NULL_HANDLE &&
+                             s.readback_mapped == nullptr)
+                        log_frame_failure(s, "readback memory is not mapped", VK_ERROR_MEMORY_MAP_FAILED);
+                }
+            }
         }
     }
-    for (Staging &staging : s.staging) {
-        vkDestroyBuffer(s.device, staging.buffer, nullptr);
-        vkFreeMemory(s.device, staging.memory, nullptr);
+    if (!submitted) {
+        const VkResult reset = vkResetCommandBuffer(s.command, 0);
+        if (reset != VK_SUCCESS) log_frame_failure(s, "vkResetCommandBuffer", reset);
+        release_staging(s);
+        // The reset above released the acquired image.
+        if (present_this_frame) retire_acquired_present(s);
     }
-    s.staging.clear();
     if (!display_ready) ++s.report.frames_without_displayed_target;
     ++s.report.game_frames;
     s.report.game_frame_vblank = vblank;
     s.report.offscreen_width = s.target_width;
     s.report.offscreen_height = s.target_height;
-    s.report.game_frame_readback_bytes = readback ? s.frame_rgba.size() : 0u;
+    const bool show = shown();
+    s.report.game_frame_readback_bytes = show && !presented_now ? s.frame_rgba.size() : 0u;
     s.report.presented_framebuffer_target = display_ready ? s.display_framebuffer : 0u;
-    s.report.gpu_frame_presented_to_window = false;
+    s.report.gpu_frame_presented_to_window = presented_now;
+    s.report.swapchain_active = s.swapchain != VK_NULL_HANDLE;
     s.vertices.clear();
     s.indices.clear();
     s.batches.clear();
     s.current_target = nullptr;
     ++s.frame_epoch;
-    return readback;
+    return presented_now || show;
 }
 
 bool ge_gpu_backend_copy_game_frame_rgba(std::span<std::byte> destination) noexcept {
@@ -2218,7 +3383,44 @@ bool ge_gpu_backend_copy_game_frame_rgba(std::span<std::byte> destination) noexc
     std::memcpy(destination.data(), s.frame_rgba.data(), s.frame_rgba.size());
     return true;
 }
-bool ge_gpu_backend_presents_directly() noexcept { return false; }
+bool ge_gpu_backend_presents_directly() noexcept {
+    VulkanState &s = state();
+    std::lock_guard<std::recursive_mutex> guard(s.mutex);
+    return s.enabled && s.swapchain != VK_NULL_HANDLE && s.direct_present_ok;
+}
+
+static bool vulkan_guest_present_available() noexcept {
+    VulkanState &s = state();
+    std::lock_guard<std::recursive_mutex> guard(s.mutex);
+    return s.enabled && s.swapchain != VK_NULL_HANDLE;
+}
+
+static bool vulkan_present_guest_rgba(std::span<const std::byte> rgba, std::uint32_t width,
+                                      std::uint32_t height) noexcept {
+    VulkanState &s = state();
+    std::lock_guard<std::recursive_mutex> guard(s.mutex);
+    if (!s.enabled) return false;
+    std::string error;
+    const bool presented = present_guest_image(s, rgba, width, height, error);
+    if (!presented && !error.empty()) {
+        static std::uint64_t failures = 0u;
+        ++failures;
+        if (failures <= 5u || (failures % 300u) == 0u)
+            std::cerr << "[vulkan] " << error << " failures=" << failures << '\n';
+    }
+    return presented;
+}
+
+namespace {
+struct RegisterVulkanGuestPresent {
+    RegisterVulkanGuestPresent() noexcept {
+        ge_guest_present().available = vulkan_guest_present_available;
+        ge_guest_present().present = vulkan_present_guest_rgba;
+    }
+};
+const RegisterVulkanGuestPresent register_vulkan_guest_present{};
+}  // namespace
+
 std::uint32_t ge_gpu_backend_owned_framebuffer() noexcept {
     const VulkanState &s = state();
     return s.enabled ? s.display_framebuffer : 0u;

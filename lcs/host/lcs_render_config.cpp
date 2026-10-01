@@ -456,6 +456,11 @@ void apply_timing_key(LcsConfiguration &config, const std::string &key,
             warning(config, line, "Timing.RealtimeSpeedIntervalVblanks must be between 1 and 36000");
         return;
     }
+    if (key == "uncapped") {
+        if (!parse_bool(value, config.timing.uncapped))
+            warning(config, line, "Timing.Uncapped expects true/false");
+        return;
+    }
     warning(config, line, "unknown [Timing] key '" + key + "'");
 }
 
@@ -755,6 +760,8 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
         set_environment_value("PSPRECOMP_REALTIME_SPEED_INTERVAL",
                               std::to_string(config.timing.realtime_speed_interval_vblanks));
     }
+    if (config.timing.uncapped && std::getenv("LCS_UNCAPPED") == nullptr)
+        set_environment_value("LCS_UNCAPPED", "1");
     if (std::getenv("PSPRECOMP_GE_BACKEND") == nullptr) {
         const char *backend_name = "software";
         if (config.rendering.backend == RenderingBackend::DirectX12) backend_name = "directx12";

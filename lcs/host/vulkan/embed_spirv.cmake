@@ -1,6 +1,6 @@
-# Compile ge.vert and ge.frag to SPIR-V and write vulkan/ge_spv.hpp.
-if(NOT GLSLANG OR NOT VERT OR NOT FRAG OR NOT OUT)
-    message(FATAL_ERROR "embed_spirv.cmake requires GLSLANG, VERT, FRAG, and OUT")
+# Compile the GE and present shaders to SPIR-V and write vulkan/ge_spv.hpp.
+if(NOT GLSLANG OR NOT VERT OR NOT FRAG OR NOT PRESENT_VERT OR NOT PRESENT_FRAG OR NOT OUT)
+    message(FATAL_ERROR "embed_spirv.cmake requires GLSLANG, VERT, FRAG, PRESENT_VERT, PRESENT_FRAG, and OUT")
 endif()
 
 get_filename_component(_dir "${OUT}" DIRECTORY)
@@ -55,17 +55,25 @@ endfunction()
 
 lcs_compile_spirv("${VERT}" "${_dir}/ge.vert.spv")
 lcs_compile_spirv("${FRAG}" "${_dir}/ge.frag.spv")
+lcs_compile_spirv("${PRESENT_VERT}" "${_dir}/present.vert.spv")
+lcs_compile_spirv("${PRESENT_FRAG}" "${_dir}/present.frag.spv")
 lcs_spirv_words("${_dir}/ge.vert.spv" vert_words)
 lcs_spirv_words("${_dir}/ge.frag.spv" frag_words)
+lcs_spirv_words("${_dir}/present.vert.spv" present_vert_words)
+lcs_spirv_words("${_dir}/present.frag.spv" present_frag_words)
 
 file(WRITE "${OUT}"
 "#pragma once
 #include <cstdint>
-// Generated from ge.vert and ge.frag by lcs/host/vulkan/embed_spirv.cmake.
+// Generated from the Vulkan shaders by lcs/host/vulkan/embed_spirv.cmake.
 namespace lcs {
 inline constexpr std::uint32_t kVulkanGeVertexSpirv[] = {
 ${vert_words}};
 inline constexpr std::uint32_t kVulkanGeFragmentSpirv[] = {
 ${frag_words}};
+inline constexpr std::uint32_t kVulkanPresentVertexSpirv[] = {
+${present_vert_words}};
+inline constexpr std::uint32_t kVulkanPresentFragmentSpirv[] = {
+${present_frag_words}};
 }
 ")

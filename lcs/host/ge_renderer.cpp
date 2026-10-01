@@ -24,6 +24,7 @@
 #include <mutex>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_M_X64) || defined(_M_IX86) || defined(__x86_64__) || defined(__i386__)
@@ -112,6 +113,10 @@ bool ge_phase_diag_enabled() noexcept {
     static const bool enabled = std::getenv("PSPRECOMP_GE_PHASE_DIAG") != nullptr;
     return enabled;
 }
+bool speed_list_split_enabled() noexcept {
+    static const bool enabled = std::getenv("PSPRECOMP_REALTIME_SPEED_DIAG") != nullptr;
+    return enabled;
+}
 std::uint64_t g_ge_pixel_ns{};
 std::uint64_t g_ge_triangle_count{};
 std::uint64_t g_ge_draw_setup_ns{};
@@ -122,19 +127,31 @@ std::uint64_t g_ge_triangle_prep_ns{};
 std::uint64_t g_ge_gpu_accumulate_ns{};
 std::uint64_t g_ge_primitive_count{};
 std::uint64_t g_ge_vertex_count{};
+std::atomic<std::uint64_t> g_live_vertex_ns{};
+std::atomic<std::uint64_t> g_live_tex_hash_ns{};
+std::atomic<std::uint64_t> g_live_tex_decode_ns{};
+std::atomic<std::uint64_t> g_live_vertex_copy_ns{};
+std::atomic<std::uint64_t> g_live_vertex_reused{};
+std::atomic<std::uint64_t> g_live_vertex_decoded{};
 
 struct PhaseTimer {
     std::uint64_t *sink;
+    // Speed-line sample. Null unless this phase is one of the four list splits.
+    std::atomic<std::uint64_t> *live;
     std::chrono::steady_clock::time_point entry;
-    explicit PhaseTimer(std::uint64_t &target) noexcept
+    explicit PhaseTimer(std::uint64_t &target,
+                        std::atomic<std::uint64_t> *live_counter = nullptr) noexcept
         : sink(ge_phase_diag_enabled() ? &target : nullptr),
-          entry(sink != nullptr ? std::chrono::steady_clock::now()
-                                : std::chrono::steady_clock::time_point{}) {}
+          live(speed_list_split_enabled() ? live_counter : nullptr),
+          entry(sink != nullptr || live != nullptr ? std::chrono::steady_clock::now()
+                                                    : std::chrono::steady_clock::time_point{}) {}
     ~PhaseTimer() {
-        if (sink == nullptr) return;
-        *sink += static_cast<std::uint64_t>(
+        if (sink == nullptr && live == nullptr) return;
+        const auto ns = static_cast<std::uint64_t>(
             std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::steady_clock::now() - entry).count());
+        if (sink != nullptr) *sink += ns;
+        if (live != nullptr) live->fetch_add(ns, std::memory_order_relaxed);
     }
     PhaseTimer(const PhaseTimer &) = delete;
     PhaseTimer &operator=(const PhaseTimer &) = delete;
@@ -190,7 +207,9 @@ std::int64_t parallel_pixel_threshold() noexcept {
 bool parallel_vertex_decode_enabled() noexcept {
     static const bool enabled = [] {
         const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_VERTEX_DECODE");
-        return text != nullptr && *text != '\0' && std::strcmp(text, "0") != 0 &&
+        // Rebuilt meshes are decoded again every frame.
+        if (text == nullptr || *text == '\0') return true;
+        return std::strcmp(text, "0") != 0 &&
                std::strcmp(text, "false") != 0 && std::strcmp(text, "FALSE") != 0 &&
                std::strcmp(text, "off") != 0 && std::strcmp(text, "OFF") != 0;
     }();
@@ -220,7 +239,7 @@ bool direct_nonindexed_gpu_draw_enabled() noexcept {
 
 std::size_t parallel_vertex_decode_threshold(bool expensive_vertex) noexcept {
     static const std::size_t simple_threshold = [] {
-        constexpr std::size_t default_value = 256u;
+        constexpr std::size_t default_value = 64u;
         const char *text = std::getenv("PSPRECOMP_GE_PARALLEL_VERTEX_THRESHOLD");
         if (text == nullptr || *text == '\0') return default_value;
         char *end = nullptr;
@@ -1512,6 +1531,82 @@ bool decode_model_vertex_0115_for_gpu_fast(
     return true;
 }
 
+std::uint16_t raw_le16(const std::uint8_t *data) noexcept {
+    return static_cast<std::uint16_t>(data[0]) |
+        (static_cast<std::uint16_t>(data[1]) << 8u);
+}
+
+std::uint32_t raw_le32(const std::uint8_t *data) noexcept {
+    return static_cast<std::uint32_t>(data[0]) |
+        (static_cast<std::uint32_t>(data[1]) << 8u) |
+        (static_cast<std::uint32_t>(data[2]) << 16u) |
+        (static_cast<std::uint32_t>(data[3]) << 24u);
+}
+
+Vec3 read_vector3_raw(const std::uint8_t *data, std::uint32_t format) noexcept {
+    switch (format) {
+    case 1u:
+        return {signed_normalized8(data[0]), signed_normalized8(data[1]),
+                signed_normalized8(data[2])};
+    case 2u:
+        return {signed_normalized16(raw_le16(data)), signed_normalized16(raw_le16(data + 2u)),
+                signed_normalized16(raw_le16(data + 4u))};
+    case 3u:
+        return {std::bit_cast<float>(raw_le32(data)), std::bit_cast<float>(raw_le32(data + 4u)),
+                std::bit_cast<float>(raw_le32(data + 8u))};
+    default:
+        return {};
+    }
+}
+
+void read_texcoord_raw(const std::uint8_t *data, std::uint32_t format, float &u, float &v) noexcept {
+    switch (format) {
+    case 0u: u = v = 0.0f; break;
+    case 1u:
+        u = static_cast<float>(data[0]) * (1.0f / 128.0f);
+        v = static_cast<float>(data[1]) * (1.0f / 128.0f);
+        break;
+    case 2u:
+        u = static_cast<float>(raw_le16(data)) * (1.0f / 32768.0f);
+        v = static_cast<float>(raw_le16(data + 2u)) * (1.0f / 32768.0f);
+        break;
+    case 3u:
+        u = std::bit_cast<float>(raw_le32(data));
+        v = std::bit_cast<float>(raw_le32(data + 4u));
+        break;
+    }
+}
+
+Color read_vertex_color_raw(const std::uint8_t *data, std::uint32_t format) noexcept {
+    switch (format) {
+    case 4u: return unpack16(raw_le16(data), 0u);
+    case 5u: return unpack16(raw_le16(data), 1u);
+    case 6u: return unpack16(raw_le16(data), 2u);
+    case 7u: return unpack32(raw_le32(data));
+    default: return {};
+    }
+}
+
+std::array<float, 12> compute_skin_matrix_raw(const std::uint8_t *vertex,
+                                              const VertexLayout &layout,
+                                              const GeTransformState &transform) {
+    std::array<float, 12> skin{};
+    const std::uint8_t *weights = vertex + layout.weight_offset;
+    for (std::uint32_t bone = 0u; bone < layout.weight_count; ++bone) {
+        float weight = 0.0f;
+        switch (layout.weight_type) {
+        case 1u: weight = weights[bone] * (1.0f / 128.0f); break;
+        case 2u: weight = raw_le16(weights + bone * 2u) * (1.0f / 32768.0f); break;
+        case 3u: weight = std::bit_cast<float>(raw_le32(weights + bone * 4u)); break;
+        }
+        if (weight == 0.0f) continue;
+        const std::size_t bone_base = static_cast<std::size_t>(bone) * 12u;
+        for (std::size_t element = 0u; element < skin.size(); ++element)
+            skin[element] += transform.bones[bone_base + element] * weight;
+    }
+    return skin;
+}
+
 bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
                                  std::uint32_t address,
                                  const VertexLayout &layout,
@@ -1521,23 +1616,30 @@ bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
                                  const PreparedLighting *prepared_lighting,
                                  std::uint32_t uv_generation,
                                  GeGpuVertex &vertex,
-                                 std::string &error) {
+                                 std::string &error,
+                                 const std::uint8_t *vertex_bytes = nullptr) {
     if (layout.type == 0x000115u && !layout.through &&
         layout.morph_count == 1u && layout.weight_type == 0u &&
         layout.normal_type == 0u && uv_generation == 0u) {
         return decode_model_vertex_0115_for_gpu_fast(
             memory, address, layout, transform, commands, lighting_enabled,
-            prepared_lighting, vertex, error);
+            prepared_lighting, vertex, error, vertex_bytes);
     }
 
-    if (!memory.contains(address, layout.stride)) {
+    const std::uint8_t *raw = vertex_bytes;
+    if (raw == nullptr && layout.morph_count == 1u)
+        raw = memory.raw_pointer(address, layout.stride);
+    const bool one_span = raw != nullptr && layout.morph_count == 1u;
+    if (!one_span && !memory.contains(address, layout.stride)) {
         error = "GE hardware-transform vertex lies outside guest memory at " +
             psprecomp::hex32(address);
         return false;
     }
 
     float u = 0.0f, v = 0.0f;
-    if (layout.morph_count == 1u) {
+    if (one_span) {
+        read_texcoord_raw(raw + layout.tc_offset, layout.tc_type, u, v);
+    } else if (layout.morph_count == 1u) {
         read_texcoord(memory, address + layout.tc_offset, layout.tc_type, false, u, v);
     } else {
         for (std::uint32_t morph = 0u; morph < layout.morph_count; ++morph) {
@@ -1549,9 +1651,14 @@ bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
         }
     }
 
-    const Color color = morph_color(memory, address, layout, transform, commands);
+    const Color color = one_span
+        ? (layout.color_type < 4u ? material_ambient_color(commands)
+                                  : read_vertex_color_raw(raw + layout.color_offset, layout.color_type))
+        : morph_color(memory, address, layout, transform, commands);
     Vec3 model_position{};
-    if (layout.morph_count == 1u) {
+    if (one_span) {
+        model_position = read_vector3_raw(raw + layout.position_offset, layout.position_type);
+    } else if (layout.morph_count == 1u) {
         model_position = read_vector3(memory, address + layout.position_offset,
                                       layout.position_type);
     } else {
@@ -1566,12 +1673,16 @@ bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
     const bool model_normal_needed = lighting_enabled || uv_generation == 2u ||
         (uv_generation == 1u && uv_generation_source >= 2u);
     Vec3 model_normal{0.0f, 0.0f, 1.0f};
-    if (model_normal_needed && layout.normal_type != 0u)
-        model_normal = read_vector3(memory, address + layout.normal_offset,
-                                    layout.normal_type);
+    if (model_normal_needed && layout.normal_type != 0u) {
+        model_normal = one_span
+            ? read_vector3_raw(raw + layout.normal_offset, layout.normal_type)
+            : read_vector3(memory, address + layout.normal_offset, layout.normal_type);
+    }
 
     if (layout.weight_type != 0u) {
-        const std::array<float, 12> skin = compute_skin_matrix(memory, address, layout, transform);
+        const std::array<float, 12> skin = one_span
+            ? compute_skin_matrix_raw(raw, layout, transform)
+            : compute_skin_matrix(memory, address, layout, transform);
         model_position = transform_4x3(skin, model_position);
         if (model_normal_needed)
             model_normal = transform_normal_4x3(skin, model_normal);
@@ -1635,6 +1746,229 @@ bool decode_model_vertex_for_gpu(const psprecomp::GuestMemory &memory,
         (static_cast<std::uint32_t>(final_color.b) << 16u) |
         (static_cast<std::uint32_t>(final_color.a) << 24u);
     return true;
+}
+
+std::uint64_t mix_vertex_word(std::uint64_t hash, std::uint64_t value) noexcept {
+    hash ^= value + 0x9E3779B97F4A7C15ull + (hash << 6u) + (hash >> 2u);
+    hash *= 0xD6E8FEB86659FD93ull;
+    return hash;
+}
+
+std::uint64_t mix_vertex_bytes(std::uint64_t hash, const std::uint8_t *data,
+                               std::size_t size) noexcept {
+    std::size_t offset = 0u;
+    while (offset + 8u <= size) {
+        std::uint64_t word = 0u;
+        std::memcpy(&word, data + offset, sizeof(word));
+        hash = mix_vertex_word(hash, word);
+        offset += 8u;
+    }
+    if (offset < size) {
+        std::uint64_t tail = 0u;
+        std::memcpy(&tail, data + offset, size - offset);
+        hash = mix_vertex_word(hash, tail ^ (static_cast<std::uint64_t>(size - offset) << 56u));
+    }
+    return hash;
+}
+
+struct StaticVertexKey {
+    std::uint32_t address{};
+    std::uint32_t layout_type{};
+    std::uint32_t stride{};
+    std::uint32_t count{};
+    std::uint64_t index_hash{};
+    bool operator==(const StaticVertexKey &) const = default;
+};
+
+struct StaticVertexKeyHash {
+    std::size_t operator()(const StaticVertexKey &key) const noexcept {
+        std::uint64_t hash = 0xCBF29CE484222325ull;
+        hash = mix_vertex_word(hash, key.address);
+        hash = mix_vertex_word(hash, (static_cast<std::uint64_t>(key.layout_type) << 32u) | key.stride);
+        hash = mix_vertex_word(hash, key.count);
+        hash = mix_vertex_word(hash, key.index_hash);
+        return static_cast<std::size_t>(hash);
+    }
+};
+
+struct StaticVertexProbe {
+    StaticVertexKey key{};
+    std::uint64_t signature{};
+    bool valid{};
+};
+
+struct StaticVertexCache {
+    struct Entry {
+        std::uint64_t signature{};
+        std::uint64_t last_used{};
+        std::vector<GeGpuVertex> vertices;
+        std::uint8_t volatile_misses{};
+    };
+    std::unordered_map<StaticVertexKey, Entry, StaticVertexKeyHash> entries;
+    std::uint64_t clock{};
+    std::size_t vertices{};
+};
+
+bool static_vertex_cache_enabled() noexcept {
+    static const bool enabled = [] {
+        const char *text = std::getenv("PSPRECOMP_GE_VERTEX_CACHE");
+        if (text == nullptr || *text == '\0') return true;
+        return std::strcmp(text, "0") != 0 &&
+               std::strcmp(text, "false") != 0 &&
+               std::strcmp(text, "FALSE") != 0 &&
+               std::strcmp(text, "off") != 0 &&
+               std::strcmp(text, "OFF") != 0;
+    }();
+    return enabled;
+}
+
+StaticVertexCache &static_vertex_cache() {
+    static thread_local StaticVertexCache cache;
+    return cache;
+}
+
+constexpr std::size_t kStaticVertexCap = 262144u;
+
+StaticVertexProbe probe_static_vertices(
+    const psprecomp::GuestMemory &memory,
+    std::uint32_t vertex_address,
+    std::uint32_t contiguous_first,
+    bool contiguous,
+    const std::uint8_t *contiguous_raw,
+    std::size_t contiguous_raw_bytes,
+    const std::vector<std::uint32_t> &unique_indices,
+    const VertexLayout &layout,
+    std::size_t decode_count) {
+    StaticVertexProbe probe;
+    if (!static_vertex_cache_enabled() || decode_count == 0u || decode_count > 65536u ||
+        layout.stride == 0u) return probe;
+    probe.key.layout_type = layout.type;
+    probe.key.stride = layout.stride;
+    probe.key.count = static_cast<std::uint32_t>(decode_count);
+    std::uint64_t signature = 0xCBF29CE484222325ull;
+    if (contiguous) {
+        const std::uint64_t bytes = static_cast<std::uint64_t>(decode_count) * layout.stride;
+        const std::uint64_t first = static_cast<std::uint64_t>(vertex_address) +
+            static_cast<std::uint64_t>(contiguous_first) * layout.stride;
+        if (contiguous_raw == nullptr || contiguous_raw_bytes != bytes ||
+            first > std::numeric_limits<std::uint32_t>::max()) return probe;
+        probe.key.address = static_cast<std::uint32_t>(first);
+        signature = mix_vertex_bytes(signature, contiguous_raw, contiguous_raw_bytes);
+    } else {
+        probe.key.address = vertex_address;
+        std::uint64_t index_hash = 0xCBF29CE484222325ull;
+        for (const std::uint32_t index : unique_indices) {
+            index_hash = mix_vertex_word(index_hash, index);
+            const std::uint64_t address = static_cast<std::uint64_t>(vertex_address) +
+                static_cast<std::uint64_t>(index) * layout.stride;
+            if (address > std::numeric_limits<std::uint32_t>::max()) return probe;
+            const std::uint8_t *raw = memory.raw_pointer(
+                static_cast<std::uint32_t>(address), layout.stride);
+            if (raw == nullptr) return probe;
+            signature = mix_vertex_bytes(signature, raw, layout.stride);
+        }
+        probe.key.index_hash = index_hash == 0u ? 1u : index_hash;
+    }
+    probe.signature = signature == 0u ? 1u : signature;
+    probe.valid = true;
+    return probe;
+}
+
+bool reuse_static_vertices(const StaticVertexProbe &probe, std::vector<GeGpuVertex> &decoded) {
+    if (!probe.valid) return false;
+    StaticVertexCache &cache = static_vertex_cache();
+    const auto found = cache.entries.find(probe.key);
+    if (found == cache.entries.end() || found->second.signature != probe.signature ||
+        found->second.vertices.size() != probe.key.count) return false;
+    decoded.assign(found->second.vertices.begin(), found->second.vertices.end());
+    found->second.last_used = ++cache.clock;
+    return true;
+}
+
+void remember_static_vertices(const StaticVertexProbe &probe,
+                              const std::vector<GeGpuVertex> &vertices) {
+    if (!probe.valid || vertices.size() != probe.key.count) return;
+    StaticVertexCache &cache = static_vertex_cache();
+    const auto existing = cache.entries.find(probe.key);
+    if (existing != cache.entries.end() && existing->second.signature != probe.signature) {
+        // The guest bytes changed again. Keeping the decoded copy does not pay.
+        if (existing->second.volatile_misses < 2u) ++existing->second.volatile_misses;
+        if (existing->second.volatile_misses >= 2u) {
+            cache.vertices -= existing->second.vertices.size();
+            existing->second.vertices.clear();
+            existing->second.signature = probe.signature;
+            existing->second.last_used = ++cache.clock;
+            return;
+        }
+    }
+    if (cache.vertices + vertices.size() > kStaticVertexCap) {
+        cache.entries.clear();
+        cache.vertices = 0u;
+    }
+    const auto [it, inserted] = cache.entries.try_emplace(probe.key);
+    if (!inserted) cache.vertices -= it->second.vertices.size();
+    it->second.signature = probe.signature;
+    it->second.last_used = ++cache.clock;
+    it->second.volatile_misses = 0u;
+    it->second.vertices.assign(vertices.begin(), vertices.end());
+    cache.vertices += it->second.vertices.size();
+}
+
+struct IndexRemapKey {
+    std::uint32_t address{};
+    std::uint32_t index_type{};
+    std::uint32_t count{};
+    std::uint64_t signature{};
+    bool operator==(const IndexRemapKey &) const = default;
+};
+
+struct IndexRemapKeyHash {
+    std::size_t operator()(const IndexRemapKey &key) const noexcept {
+        std::uint64_t hash = 0xCBF29CE484222325ull;
+        hash = mix_vertex_word(hash, key.address);
+        hash = mix_vertex_word(hash, (static_cast<std::uint64_t>(key.index_type) << 32u) | key.count);
+        hash = mix_vertex_word(hash, key.signature);
+        return static_cast<std::size_t>(hash);
+    }
+};
+
+struct IndexRemapCache {
+    struct Plan {
+        std::vector<std::uint32_t> unique;
+        std::vector<std::uint32_t> remap;
+    };
+    std::unordered_map<IndexRemapKey, Plan, IndexRemapKeyHash> entries;
+};
+
+IndexRemapCache &index_remap_cache() {
+    static thread_local IndexRemapCache cache;
+    return cache;
+}
+
+constexpr std::size_t kIndexRemapCap = 128u;
+
+bool recall_index_remap(std::uint32_t address, std::uint32_t index_type, std::uint32_t count,
+                        std::uint64_t signature, std::vector<std::uint32_t> &unique,
+                        std::vector<std::uint32_t> &remap) {
+    if (count < 96u) return false;
+    IndexRemapCache &cache = index_remap_cache();
+    const auto found = cache.entries.find(IndexRemapKey{address, index_type, count, signature});
+    if (found == cache.entries.end() || found->second.remap.size() != count) return false;
+    unique = found->second.unique;
+    remap = found->second.remap;
+    return true;
+}
+
+void store_index_remap(std::uint32_t address, std::uint32_t index_type, std::uint32_t count,
+                       std::uint64_t signature, const std::vector<std::uint32_t> &unique,
+                       const std::vector<std::uint32_t> &remap) {
+    if (count < 96u || remap.size() != count) return;
+    IndexRemapCache &cache = index_remap_cache();
+    if (cache.entries.size() >= kIndexRemapCap) cache.entries.clear();
+    IndexRemapCache::Plan &plan =
+        cache.entries[IndexRemapKey{address, index_type, count, signature}];
+    plan.unique = unique;
+    plan.remap = remap;
 }
 
 std::uint32_t framebuffer_address(const std::array<std::uint32_t, 256> &commands) noexcept {
@@ -3947,6 +4281,10 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         gpu_draw.primitive = primitive;
         gpu_draw.vertex_count = count;
 
+        // Palette checksum and the once-per-frame texture hash.
+        const bool time_tex_hash = speed_list_split_enabled();
+        const auto tex_hash_started = time_tex_hash ? std::chrono::steady_clock::now()
+                                                    : std::chrono::steady_clock::time_point{};
         gpu_draw.clut_checksum = 0u;
         if (gpu_draw.texture_format >= 4u && gpu_draw.texture_format <= 7u &&
             gpu_draw.clut_address != 0u) {
@@ -3993,6 +4331,12 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 signature ^= part + 0x9E3779B97F4A7C15ull + (signature << 6u) + (signature >> 2u);
             }
             gpu_draw.texture_content_signature = any_signature ? signature : 0u;
+        }
+        if (time_tex_hash) {
+            g_live_tex_hash_ns.fetch_add(static_cast<std::uint64_t>(
+                std::chrono::duration_cast<std::chrono::nanoseconds>(
+                    std::chrono::steady_clock::now() - tex_hash_started).count()),
+                std::memory_order_relaxed);
         }
         ge_gpu_backend_record_draw(gpu_draw);
         if (!gpu_draw.clear_mode && primitive >= 3u && primitive <= 6u)
@@ -4042,7 +4386,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
     if (gpu_backend_enabled && gpu_draw.texture_enabled &&
         ge_gpu_backend_texture_needed(gpu_draw) &&
         !ge_gpu_backend_adopt_shared_texture(gpu_draw)) {
-        PhaseTimer texture_timer(g_ge_texture_upload_ns);
+        PhaseTimer texture_timer(g_ge_texture_upload_ns, &g_live_tex_decode_ns);
         const bool framebuffer_feedback =
             ge_gpu_backend_is_framebuffer_feedback_texture(gpu_draw);
         const std::uint32_t level_count = framebuffer_feedback ? 1u :
@@ -4146,7 +4490,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         std::uint32_t contiguous_count = indexed ? 0u : count;
 
         {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns);
+        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
         if (indexed) {
             occurrence_indices.reserve(count);
             const IndexStreamReader draw_indices =
@@ -4173,14 +4517,24 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 contiguous_first = lower;
                 contiguous_count = static_cast<std::uint32_t>(range64);
             } else {
-                unique_indices = occurrence_indices;
-                std::sort(unique_indices.begin(), unique_indices.end());
-                unique_indices.erase(std::unique(unique_indices.begin(), unique_indices.end()),
-                                     unique_indices.end());
-                occurrence_remap.reserve(count);
-                for (std::uint32_t index : occurrence_indices) {
-                    const auto found = std::lower_bound(unique_indices.begin(), unique_indices.end(), index);
-                    occurrence_remap.push_back(static_cast<std::uint32_t>(found - unique_indices.begin()));
+                std::uint64_t signature = 0xCBF29CE484222325ull;
+                for (const std::uint32_t index : occurrence_indices)
+                    signature = mix_vertex_word(signature, index);
+                if (signature == 0u) signature = 1u;
+                // The occurrence scan stays. A repeated index list skips the sort.
+                if (!recall_index_remap(index_address, layout.index_type, count, signature,
+                                        unique_indices, occurrence_remap)) {
+                    unique_indices = occurrence_indices;
+                    std::sort(unique_indices.begin(), unique_indices.end());
+                    unique_indices.erase(std::unique(unique_indices.begin(), unique_indices.end()),
+                                         unique_indices.end());
+                    occurrence_remap.reserve(count);
+                    for (std::uint32_t index : occurrence_indices) {
+                        const auto found = std::lower_bound(unique_indices.begin(), unique_indices.end(), index);
+                        occurrence_remap.push_back(static_cast<std::uint32_t>(found - unique_indices.begin()));
+                    }
+                    store_index_remap(index_address, layout.index_type, count, signature,
+                                      unique_indices, occurrence_remap);
                 }
             }
         }
@@ -4292,7 +4646,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 : (needs_indices ? triangle_indices.size() / 3u : count / 3u);
             bool accepted = false;
             {
-                PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+                PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
                 accepted = ge_gpu_backend_accumulate_hardware_packed_0115(
                     effective_draw, hw,
                     std::span<const std::byte>(
@@ -4308,25 +4662,42 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             triangle_indices.clear();
         }
 
-        decoded_vertices.resize(decode_count);
         {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns);
+        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
+        // Model-space only. Skin, morph, generated UVs, and baked light stay uncached.
+        const bool cacheable = !cpu_lighting_effective && layout.weight_type == 0u &&
+            layout.morph_count <= 1u && uv_generation == 0u;
+        const StaticVertexProbe probe = cacheable ? probe_static_vertices(
+            memory, vertex_address, contiguous_first, contiguous_decode,
+            contiguous_raw, contiguous_raw_bytes, unique_indices, layout, decode_count)
+            : StaticVertexProbe{};
+        if (reuse_static_vertices(probe, decoded_vertices)) {
+            if (speed_list_split_enabled())
+                g_live_vertex_reused.fetch_add(decode_count, std::memory_order_relaxed);
+        } else {
+        decoded_vertices.resize(decode_count);
+        // A worker's thread_local copy is empty. Bind the caller's buffers.
+        std::vector<GeGpuVertex> &decoded_out = decoded_vertices;
+        const std::vector<std::uint32_t> &unique_out = unique_indices;
         const auto decode_one = [&](std::size_t i, std::string &decode_error) -> bool {
             const std::uint32_t index = contiguous_decode
-                ? contiguous_first + static_cast<std::uint32_t>(i) : unique_indices[i];
+                ? contiguous_first + static_cast<std::uint32_t>(i) : unique_out[i];
+            const std::uint8_t *raw = contiguous_raw != nullptr && layout.stride != 0u
+                ? contiguous_raw + i * static_cast<std::size_t>(layout.stride) : nullptr;
             if (fast_0115_raw != nullptr) {
                 return decode_model_vertex_0115_for_gpu_fast(
                     memory, vertex_address + index * layout.stride, layout, transform, commands,
                     cpu_lighting_effective, cpu_lighting_effective ? &prepared_lighting : nullptr,
-                    decoded_vertices[i], decode_error,
-                    fast_0115_raw + i * static_cast<std::size_t>(layout.stride),
+                    decoded_out[i], decode_error,
+                    raw != nullptr ? raw
+                                   : fast_0115_raw + i * static_cast<std::size_t>(layout.stride),
                     fast_0115_world_normal_ptr);
             }
             return decode_model_vertex_for_gpu(memory, vertex_address + index * layout.stride,
                                                layout, transform, commands,
                                                cpu_lighting_effective,
                                                cpu_lighting_effective ? &prepared_lighting : nullptr,
-                                               uv_generation, decoded_vertices[i], decode_error);
+                                               uv_generation, decoded_out[i], decode_error, raw);
         };
 
         RowWorkerPool &decode_pool = RowWorkerPool::instance();
@@ -4365,6 +4736,10 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             for (std::size_t i = 0u; i < decode_count; ++i) {
                 if (!decode_one(i, error)) return false;
             }
+        }
+        remember_static_vertices(probe, decoded_vertices);
+        if (speed_list_split_enabled())
+            g_live_vertex_decoded.fetch_add(decoded_vertices.size(), std::memory_order_relaxed);
         }
         if (collect_diagnostic_stats) stats.decoded_vertices += decoded_vertices.size();
         }
@@ -4409,7 +4784,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
                 decoded_vertices.size() == count) {
                 if (collect_diagnostic_stats) stats.triangles += count / 3u;
                 {
-                    PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+                    PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
                     ge_gpu_backend_accumulate_hardware_triangles(
                         effective_draw, hw, decoded_vertices, {});
                 }
@@ -4469,7 +4844,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
         }
 
         {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             const std::span<const GeGpuVertex> upload_vertices = flat_shading
                 ? std::span<const GeGpuVertex>(submitted_vertices)
                 : std::span<const GeGpuVertex>(decoded_vertices);
@@ -4490,7 +4865,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
 
     static thread_local std::vector<Vertex> vertices;
     {
-        PhaseTimer vertex_timer(g_ge_vertex_decode_ns);
+        PhaseTimer vertex_timer(g_ge_vertex_decode_ns, &g_live_vertex_ns);
         vertices.clear();
         vertices.reserve(count);
         const IndexStreamReader draw_indices =
@@ -4606,7 +4981,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
         rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
@@ -4630,7 +5005,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
         rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
@@ -4649,7 +5024,7 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             }
         }
         if (gpu_backend_enabled) {
-            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns);
+            PhaseTimer accumulate_timer(g_ge_gpu_accumulate_ns, &g_live_vertex_copy_ns);
             accumulate_gpu_prepared_triangles(gpu_draw, triangles);
         }
         rasterize_prepared_triangles(memory, commands, setup, triangles, stats);
@@ -4681,6 +5056,17 @@ GePhaseTotals ge_phase_totals() noexcept {
         g_ge_draw_setup_ns, g_ge_texture_upload_ns, g_ge_vertex_decode_ns,
         g_ge_gpu_stage_ns, g_ge_triangle_prep_ns, g_ge_gpu_accumulate_ns,
         g_ge_primitive_count, g_ge_vertex_count,
+    };
+}
+
+GeListSplitNs take_ge_list_split() noexcept {
+    return GeListSplitNs{
+        g_live_vertex_ns.exchange(0u, std::memory_order_relaxed),
+        g_live_tex_hash_ns.exchange(0u, std::memory_order_relaxed),
+        g_live_tex_decode_ns.exchange(0u, std::memory_order_relaxed),
+        g_live_vertex_copy_ns.exchange(0u, std::memory_order_relaxed),
+        g_live_vertex_reused.exchange(0u, std::memory_order_relaxed),
+        g_live_vertex_decoded.exchange(0u, std::memory_order_relaxed),
     };
 }
 
