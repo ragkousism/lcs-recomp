@@ -1149,7 +1149,8 @@ bool window_pixels(SDL_Window *window, std::uint32_t &width, std::uint32_t &heig
     if (window == nullptr) return false;
     int w = 0;
     int h = 0;
-    SDL_Vulkan_GetDrawableSize(window, &w, &h);
+    if ((SDL_GetWindowFlags(window) & SDL_WINDOW_VULKAN) != 0u)
+        SDL_Vulkan_GetDrawableSize(window, &w, &h);
     if (w <= 0 || h <= 0) SDL_GetWindowSize(window, &w, &h);
     if (w <= 0 || h <= 0) return false;
     width = static_cast<std::uint32_t>(w);
@@ -1250,8 +1251,9 @@ void destroy_present_device(VulkanState &s) noexcept {
 
 bool create_window_surface(VulkanState &s, std::string &error) {
     if (s.surface != VK_NULL_HANDLE) return true;
-    if (s.window == nullptr || s.instance == VK_NULL_HANDLE) {
-        error = "Vulkan present has no window";
+    if (s.window == nullptr || s.instance == VK_NULL_HANDLE ||
+        (SDL_GetWindowFlags(s.window) & SDL_WINDOW_VULKAN) == 0u) {
+        error = "Vulkan present has no Vulkan-capable window";
         return false;
     }
     if (SDL_Vulkan_CreateSurface(s.window, s.instance, &s.surface) != SDL_TRUE) {
@@ -2332,7 +2334,7 @@ bool create_backend(VulkanState &s, std::string &error) {
     const char *debug_extension = VK_EXT_DEBUG_UTILS_EXTENSION_NAME;
     std::vector<const char *> instance_extensions;
     bool sdl_surface_extensions = false;
-    if (s.window != nullptr) {
+    if (s.window != nullptr && (SDL_GetWindowFlags(s.window) & SDL_WINDOW_VULKAN) != 0u) {
         unsigned int sdl_count = 0u;
         if (SDL_Vulkan_GetInstanceExtensions(s.window, &sdl_count, nullptr) == SDL_TRUE && sdl_count > 0u) {
             instance_extensions.resize(sdl_count);
