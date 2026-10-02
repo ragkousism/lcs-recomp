@@ -412,6 +412,29 @@ inline bool &ge_finish_shows_this_frame() noexcept {
 
 [[nodiscard]] bool ge_gpu_backend_presents_directly() noexcept;
 
+// Empty until a backend that can show a guest frame assigns it.
+struct GeGuestPresent {
+    bool (*available)() noexcept {};
+    bool (*present)(std::span<const std::byte>, std::uint32_t, std::uint32_t) noexcept {};
+};
+
+inline GeGuestPresent &ge_guest_present() noexcept {
+    static GeGuestPresent present;
+    return present;
+}
+
+[[nodiscard]] inline bool ge_gpu_backend_guest_present_available() noexcept {
+    const auto available = ge_guest_present().available;
+    return available != nullptr && available();
+}
+
+// False leaves the caller on its own blit.
+[[nodiscard]] inline bool ge_gpu_backend_present_guest_rgba(
+    std::span<const std::byte> rgba, std::uint32_t width, std::uint32_t height) noexcept {
+    const auto present = ge_guest_present().present;
+    return present != nullptr && present(rgba, width, height);
+}
+
 [[nodiscard]] std::uint32_t ge_gpu_backend_owned_framebuffer() noexcept;
 
 [[nodiscard]] std::uint32_t ge_gpu_backend_display_framebuffer() noexcept;

@@ -41,7 +41,7 @@ else()
     target_compile_definitions(LCSNative PRIVATE LCS_VULKAN_GE_BACKEND=1)
     target_link_libraries(LCSNative PRIVATE
         PkgConfig::FFMPEG PkgConfig::SDL2 PkgConfig::VULKAN Threads::Threads)
-    # ge_spv.hpp is produced here so an edit to ge.vert or ge.frag is what the binary runs.
+    # ge_spv.hpp is produced here so an edit to a shader is what the binary runs.
     find_program(LCS_GLSLANG NAMES glslangValidator glslang REQUIRED)
     set(LCS_GE_SPV_HEADER ${CMAKE_CURRENT_BINARY_DIR}/generated/vulkan/ge_spv.hpp)
     add_custom_command(
@@ -50,11 +50,15 @@ else()
             -DGLSLANG=${LCS_GLSLANG}
             -DVERT=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.vert
             -DFRAG=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.frag
+            -DPRESENT_VERT=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/present.vert
+            -DPRESENT_FRAG=${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/present.frag
             -DOUT=${LCS_GE_SPV_HEADER}
             -P ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/embed_spirv.cmake
         DEPENDS
             ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.vert
             ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/ge.frag
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/present.vert
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/present.frag
             ${CMAKE_CURRENT_SOURCE_DIR}/host/vulkan/embed_spirv.cmake
         COMMENT "Compiling Vulkan GE shaders"
         VERBATIM)

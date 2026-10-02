@@ -2009,8 +2009,12 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
 
     bool presented_gpu_frame = false;
     if (ge_gpu_backend_presents_directly()) {
-        ge_gpu_backend_mark_window_presented();
-        presented_gpu_frame = true;
+        const bool show_guest = !gpu_frame_ready && !holding_gpu_frame &&
+                                ge_gpu_backend_guest_present_available();
+        if (!show_guest) {
+            ge_gpu_backend_mark_window_presented();
+            presented_gpu_frame = true;
+        }
     } else if ((gpu_frame_ready || holding_gpu_frame) && ge_gpu_backend_active()) {
         const GeGpuBackendReport gpu = ge_gpu_backend_report();
         const std::span<const std::byte> rgba = ge_gpu_backend_game_frame_rgba();
