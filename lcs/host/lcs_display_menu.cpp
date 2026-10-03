@@ -37,7 +37,7 @@ constexpr ResolutionChoice kResolutions[] = {
 
 constexpr float kDistances[] = {1.0f, 1.25f, 1.5f, 1.75f, 2.0f, 2.5f, 3.0f, 4.0f};
 constexpr std::uint32_t kFrameRates[] = {30u, 60u};
-constexpr int kRowCount = 5;
+constexpr int kRowCount = kHostSettingsRowCount;
 
 bool g_open = false;
 int g_selected = 0;
@@ -197,6 +197,8 @@ void save_settings() {
     const RenderingConfiguration &rendering = config.rendering;
     upsert_ini_line(file, "display", "Fullscreen", config.display.fullscreen ? "true" : "false");
     upsert_ini_line(file, "rendering", "ViewDistance", distance);
+    upsert_ini_line(file, "rendering", "SpawnCount",
+                    rendering.increased_spawn ? "Increased" : "Original");
     upsert_ini_line(file, "rendering", "InternalResolutionMode",
                     internal_resolution_mode_name(rendering.internal_resolution_mode));
     upsert_ini_line(file, "rendering", "InternalScale", std::to_string(rendering.internal_scale));
@@ -227,9 +229,11 @@ void change_selected(int direction) noexcept {
         lcs_set_internal_resolution(choice.mode, choice.scale);
     } else if (g_selected == 3) {
         lcs_set_show_fps(!lcs_render_configuration().display.show_fps);
-    } else {
+    } else if (g_selected == 4) {
         const int index = lcs_render_configuration().timing.frame_rate == 30u ? 0 : 1;
         lcs_set_frame_rate(kFrameRates[step_index(index, static_cast<int>(std::size(kFrameRates)), direction)]);
+    } else if (g_selected == 5) {
+        lcs_set_increased_spawn(!lcs_render_configuration().rendering.increased_spawn);
     }
     save_settings();
 }
@@ -367,7 +371,7 @@ void rasterize_settings_overlay(const HostSettingsView &view, std::uint8_t *rgba
                  8u, 12u, 28u, 230u);
     overlay_text(rgba, width, height, 8 * scale, 6 * scale, scale, "HOST SETTINGS", 180u, 200u, 230u);
     overlay_text(rgba, width, height, 8 * scale, 6 * scale + line, scale, "F10 CLOSE", 180u, 200u, 230u);
-    for (int row = 0; row < 5; ++row) {
+    for (int row = 0; row < kHostSettingsRowCount; ++row) {
         const int y = 6 * scale + line * (2 + row);
         if (row == view.selected)
             overlay_fill(rgba, width, height, 4 * scale, y - scale,
@@ -378,8 +382,8 @@ void rasterize_settings_overlay(const HostSettingsView &view, std::uint8_t *rgba
                      row == view.selected ? 255u : 190u, row == view.selected ? 255u : 220u);
     }
     if (view.resolution_pending) {
-        overlay_text(rgba, width, height, 8 * scale, 6 * scale + line * 7, scale,
-                     "RESTART TO APPLY", 220u, 180u, 80u);
+        overlay_text(rgba, width, height, 8 * scale, 6 * scale + line * (kHostSettingsRowCount + 2),
+                     scale, "RESTART TO APPLY", 220u, 180u, 80u);
     }
 }
 
@@ -412,6 +416,8 @@ HostSettingsView host_settings_view() noexcept {
                   lcs_render_configuration().display.show_fps ? "On" : "Off");
     std::snprintf(view.rows[4], sizeof(view.rows[4]), "Frame rate      %u",
                   lcs_render_configuration().timing.frame_rate);
+    std::snprintf(view.rows[5], sizeof(view.rows[5]), "Spawn count     %s",
+                  lcs_render_configuration().rendering.increased_spawn ? "Increased" : "Original");
     return view;
 }
 
