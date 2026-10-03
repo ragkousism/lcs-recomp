@@ -293,7 +293,7 @@ void paint_host_settings(SDL_Renderer *renderer) noexcept {
     SDL_SetRenderDrawColor(renderer, 180, 200, 230, 255);
     draw_text(renderer, origin_x + 8 * scale, origin_y + 6 * scale, scale, "HOST SETTINGS");
     draw_text(renderer, origin_x + 8 * scale, origin_y + 16 * scale, scale, "F10 CLOSE");
-    for (int row = 0; row < 5; ++row) {
+    for (int row = 0; row < kHostSettingsRowCount; ++row) {
         const int y = origin_y + (28 + row * 12) * scale;
         if (row == view.selected) {
             SDL_SetRenderDrawColor(renderer, 40, 70, 120, 255);
@@ -306,8 +306,8 @@ void paint_host_settings(SDL_Renderer *renderer) noexcept {
     }
     if (view.resolution_pending) {
         SDL_SetRenderDrawColor(renderer, 220, 180, 80, 255);
-        draw_text(renderer, origin_x + 8 * scale, origin_y + (28 + 5 * 12) * scale, scale,
-                  "RESTART TO APPLY");
+        draw_text(renderer, origin_x + 8 * scale,
+                  origin_y + (28 + kHostSettingsRowCount * 12) * scale, scale, "RESTART TO APPLY");
     }
 }
 

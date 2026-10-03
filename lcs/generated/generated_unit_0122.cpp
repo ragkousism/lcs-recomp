@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -5040,6 +5041,7 @@ L_089EE1B8:
     ctx.gpr[7] = (2229u << 16u);
     ctx.gpr[5] = (ctx.gpr[5] + ctx.gpr[6]);
     ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[7] + static_cast<std::uint32_t>(-17404)));
+    ctx.gpr[6] = static_cast<std::uint32_t>(lcs::scale_spawn_count(static_cast<std::int32_t>(ctx.gpr[6])));
     ctx.gpr[5] = (static_cast<std::int32_t>(ctx.gpr[6]) < static_cast<std::int32_t>(ctx.gpr[5]) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[5] != 0u;
     // nop
@@ -6591,6 +6593,7 @@ L_089EEC30:
     ctx.fpr[16] = static_cast<float>(static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(ctx.fpr[16])));
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[14]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[15]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
+    ctx.fpr[12] = ctx.fpr[12] * lcs::spawn_count_scale();
     ctx.set_fpu_condition((ctx.fpr[16] < ctx.fpr[12]));
     // nop
     { const bool branch_taken = !ctx.fpu_condition();
@@ -6619,6 +6622,7 @@ L_089EEC80:
     ctx.gpr[6] = (2229u << 16u);
     ctx.gpr[4] = (ctx.gpr[4] + ctx.gpr[5]);
     ctx.gpr[5] = (aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(-17404)));
+    ctx.gpr[5] = static_cast<std::uint32_t>(lcs::scale_spawn_count(static_cast<std::int32_t>(ctx.gpr[5])));
     ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[4]) < static_cast<std::int32_t>(ctx.gpr[5]) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[4] != 0u;
     // nop
@@ -6664,6 +6668,7 @@ L_089EECEC:
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[13]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
     ctx.fpr[14] = static_cast<float>(static_cast<std::int32_t>(std::bit_cast<std::uint32_t>(ctx.fpr[14])));
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[15]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
+    ctx.fpr[12] = ctx.fpr[12] * lcs::spawn_count_scale();
     ctx.set_fpu_condition((ctx.fpr[14] < ctx.fpr[12]));
     // nop
     { const bool branch_taken = !ctx.fpu_condition();
@@ -6692,6 +6697,7 @@ L_089EED2C:
     ctx.gpr[6] = (2229u << 16u);
     ctx.gpr[4] = (ctx.gpr[4] + ctx.gpr[5]);
     ctx.gpr[5] = (aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(-17404)));
+    ctx.gpr[5] = static_cast<std::uint32_t>(lcs::scale_spawn_count(static_cast<std::int32_t>(ctx.gpr[5])));
     ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[4]) < static_cast<std::int32_t>(ctx.gpr[5]) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[4] == 0u;
     // nop

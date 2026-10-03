@@ -226,7 +226,7 @@ void paint_host_overlay(HDC hdc) noexcept {
         SetTextColor(hdc, RGB(180, 200, 230));
         TextOutA(hdc, origin_x + 12, origin_y + 8, "HOST SETTINGS", 13);
         TextOutA(hdc, origin_x + 12, origin_y + 8 + line, "F10 CLOSE", 9);
-        for (int row = 0; row < 5; ++row) {
+        for (int row = 0; row < kHostSettingsRowCount; ++row) {
             const int y = origin_y + 8 + line * (2 + row);
             if (row == view.selected) {
                 RECT highlight{origin_x + 6, y - 2, origin_x + panel_w - 6, y + font_h + 4};
@@ -241,7 +241,8 @@ void paint_host_overlay(HDC hdc) noexcept {
         }
         if (view.resolution_pending) {
             SetTextColor(hdc, RGB(220, 180, 80));
-            TextOutA(hdc, origin_x + 12, origin_y + 8 + line * 7, "RESTART TO APPLY", 16);
+            TextOutA(hdc, origin_x + 12, origin_y + 8 + line * (kHostSettingsRowCount + 2),
+                     "RESTART TO APPLY", 16);
         }
     }
     SelectObject(hdc, previous);

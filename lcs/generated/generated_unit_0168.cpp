@@ -970,6 +970,23 @@ L_08AA4168:
       goto L_08AA4180;
     }
 L_08AA4180:
+    ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(8)));
+    { const bool branch_taken = ctx.gpr[6] == 0u;
+      if (branch_taken) {
+          goto L_08AA4180_cb;
+      }
+      goto L_08AA4180_root;
+    }
+L_08AA4180_root:
+    // Unlinked root cannot be reused. Drop it so a later free can start a new tree.
+    { const bool branch_taken = ctx.gpr[6] < 0x08000000u || ctx.gpr[6] >= 0x0A000000u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) == 0u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) < 0x08000000u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) >= 0x0A000000u;
+      if (branch_taken) {
+          aot_mem.aot_store32(ctx.gpr[17] + static_cast<std::uint32_t>(8), 0u);
+          goto L_08AA4180_cb;
+      }
+      goto L_08AA4180_cb;
+    }
+L_08AA4180_cb:
     ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(4)));
     ctx.gpr[4] = (ctx.gpr[17] | 0u);
     jump_target = ctx.gpr[6];
@@ -1084,6 +1101,23 @@ L_08AA426C:
       goto L_08AA4288;
     }
 L_08AA4288:
+    ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[18] + static_cast<std::uint32_t>(8)));
+    { const bool branch_taken = ctx.gpr[6] == 0u;
+      if (branch_taken) {
+          goto L_08AA4288_cb;
+      }
+      goto L_08AA4288_root;
+    }
+L_08AA4288_root:
+    // Unlinked root cannot be reused. Drop it so a later free can start a new tree.
+    { const bool branch_taken = ctx.gpr[6] < 0x08000000u || ctx.gpr[6] >= 0x0A000000u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) == 0u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) < 0x08000000u || aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(16)) >= 0x0A000000u;
+      if (branch_taken) {
+          aot_mem.aot_store32(ctx.gpr[18] + static_cast<std::uint32_t>(8), 0u);
+          goto L_08AA4288_cb;
+      }
+      goto L_08AA4288_cb;
+    }
+L_08AA4288_cb:
     ctx.gpr[6] = (aot_mem.aot_load32(ctx.gpr[18] + static_cast<std::uint32_t>(4)));
     ctx.gpr[4] = (ctx.gpr[18] | 0u);
     jump_target = ctx.gpr[6];
@@ -1223,6 +1257,22 @@ L_08AA43D4:
       goto L_08AA43DC;
     }
 L_08AA43DC:
+    // A free chunk's parent is its bin. Null or wild means it is not linked.
+    { const bool branch_taken = ctx.gpr[7] < 0x08000000u || ctx.gpr[7] >= 0x0A000000u;
+      if (branch_taken) {
+          goto L_08AA4434;
+      }
+      goto L_08AA43DC_parent;
+    }
+L_08AA43DC_parent:
+    ctx.gpr[8] = (aot_mem.aot_load32(ctx.gpr[7] + static_cast<std::uint32_t>(16)));
+    { const bool branch_taken = ctx.gpr[8] == 0u || ctx.gpr[8] < 0x08000000u || ctx.gpr[8] >= 0x0A000000u;
+      if (branch_taken) {
+          goto L_08AA4434;
+      }
+      goto L_08AA43DC_size;
+    }
+L_08AA43DC_size:
     ctx.gpr[8] = (aot_mem.aot_load32(ctx.gpr[7] + static_cast<std::uint32_t>(0)));
     ctx.gpr[8] = (ctx.gpr[8] - ctx.gpr[6]);
     ctx.gpr[8] = (ctx.gpr[8] < ctx.gpr[5] ? 1u : 0u);
@@ -1234,15 +1284,25 @@ L_08AA43DC:
       goto L_08AA43F0;
     }
 L_08AA43F0:
-    ctx.gpr[7] = (aot_mem.aot_load32(ctx.gpr[7] + static_cast<std::uint32_t>(12)));
-    { const bool branch_taken = ctx.gpr[7] == 0u;
-    // nop
+    ctx.gpr[8] = (aot_mem.aot_load32(ctx.gpr[7] + static_cast<std::uint32_t>(12)));
+    { const bool branch_taken = ctx.gpr[8] == 0u || ctx.gpr[8] < 0x08000000u || ctx.gpr[8] >= 0x0A000000u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) == 0u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) < 0x08000000u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) >= 0x0A000000u;
       if (branch_taken) {
-          goto L_08AA4408;
+          goto L_08AA43F4;
       }
       goto L_08AA43FC;
     }
+L_08AA43F4:
+    { const bool branch_taken = ctx.gpr[8] == 0u;
+      if (branch_taken) {
+          goto L_08AA4408;
+      }
+      goto L_08AA43F8;
+    }
+L_08AA43F8:
+    aot_mem.aot_store32(ctx.gpr[7] + static_cast<std::uint32_t>(12), 0u);
+    goto L_08AA4408;
 L_08AA43FC:
+    ctx.gpr[7] = (ctx.gpr[8] | 0u);
     ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(1));
     goto L_08AA4400;
 L_08AA4400:
@@ -1266,6 +1326,14 @@ L_08AA4410:
     { const bool branch_taken = ctx.gpr[8] == 0u;
     // nop
       if (branch_taken) {
+          goto L_08AA442C;
+      }
+      goto L_08AA4414;
+    }
+L_08AA4414:
+    { const bool branch_taken = ctx.gpr[8] < 0x08000000u || ctx.gpr[8] >= 0x0A000000u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) == 0u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) < 0x08000000u || aot_mem.aot_load32(ctx.gpr[8] + static_cast<std::uint32_t>(16)) >= 0x0A000000u;
+      if (branch_taken) {
+          aot_mem.aot_store32(ctx.gpr[7] + static_cast<std::uint32_t>(8), 0u);
           goto L_08AA442C;
       }
       goto L_08AA441C;

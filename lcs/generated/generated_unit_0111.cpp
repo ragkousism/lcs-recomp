@@ -2500,7 +2500,7 @@ L_089C0A9C:
       goto L_089C0AA4;
     }
 L_089C0AA4:
-    aot_mem.aot_store8(ctx.gpr[6] + static_cast<std::uint32_t>(-28700), static_cast<std::uint8_t>(0u));
+    // Outer sweep still owns the flag. Clearing it lets a second sweep start.
     ctx.gpr[2] = (0u | 0u);
     goto L_089C0AAC;
 L_089C0AAC:
@@ -2804,8 +2804,7 @@ L_089C0CFC:
       goto L_089C0D04;
     }
 L_089C0D04:
-    ctx.gpr[4] = (2229u << 16u);
-    aot_mem.aot_store8(ctx.gpr[4] + static_cast<std::uint32_t>(-28699), static_cast<std::uint8_t>(0u));
+    // Outer sweep still owns the flag. Clearing it lets a second sweep start.
     ctx.gpr[2] = (0u | 0u);
     goto L_089C0D10;
 L_089C0D10:

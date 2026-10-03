@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -6976,7 +6977,8 @@ L_08A06C6C:
     }
 L_08A06C78:
     ctx.gpr[4] = (ctx.gpr[18] | 0u);
-    ctx.gpr[5] = (0u | 60u);
+    // Ped pool stays doubled so the menu can switch without a restart.
+    ctx.gpr[5] = static_cast<std::uint32_t>(lcs::increased_spawn_slots(60));
     ctx.gpr[31] = (0x08A06C88u);
     ctx.gpr[6] = (ctx.gpr[6] + static_cast<std::uint32_t>(-200));
     if (rt.invoke_chained_direct<&recomp_unit_0192_entry, 192u, 277u, 0x08B0552Cu>(ctx, &aot_mem) && ctx.pc == 0x08A06C88u) goto L_08A06C88;
@@ -7003,7 +7005,8 @@ L_08A06CA0:
     }
 L_08A06CAC:
     ctx.gpr[4] = (ctx.gpr[18] | 0u);
-    ctx.gpr[5] = (0u | 60u);
+    // Car pool stays doubled so the menu can switch without a restart.
+    ctx.gpr[5] = static_cast<std::uint32_t>(lcs::increased_spawn_slots(60));
     ctx.gpr[31] = (0x08A06CBCu);
     ctx.gpr[6] = (ctx.gpr[6] + static_cast<std::uint32_t>(-192));
     if (rt.invoke_chained_direct<&recomp_unit_0192_entry, 192u, 283u, 0x08B055D4u>(ctx, &aot_mem) && ctx.pc == 0x08A06CBCu) goto L_08A06CBC;

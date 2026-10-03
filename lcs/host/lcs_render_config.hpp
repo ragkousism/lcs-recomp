@@ -77,7 +77,20 @@ struct DisplaySurfaceDimensions {
 
 [[nodiscard]] float view_distance_scale() noexcept;
 
+// Ped and vehicle caps. 1 is the PSP count.
+[[nodiscard]] float spawn_count_scale() noexcept;
+
+[[nodiscard]] inline std::int32_t scale_spawn_count(std::int32_t count) noexcept {
+    return static_cast<std::int32_t>(static_cast<float>(count) * spawn_count_scale());
+}
+
+// Pools stay doubled so the setting can change without a restart.
+[[nodiscard]] inline std::int32_t increased_spawn_slots(std::int32_t count) noexcept {
+    return count * 2;
+}
+
 void lcs_set_view_distance(float value) noexcept;
+void lcs_set_increased_spawn(bool enabled) noexcept;
 void lcs_set_fullscreen_setting(bool enabled) noexcept;
 void lcs_set_show_fps(bool enabled) noexcept;
 void lcs_set_frame_rate(std::uint32_t frame_rate) noexcept;
@@ -101,8 +114,10 @@ struct RenderingConfiguration {
     std::uint32_t internal_height{544u};
     std::uint32_t anisotropic_filtering{1u};
     float texture_lod_bias{0.0f};
-    // LOD distance (TheCamera+224), far clip (RwCamera+132), fog plane (RwCamera+136).
+    // LOD and peds (TheCamera+224), car models, far clip (RwCamera+132), fog (RwCamera+136).
     float view_distance{1.0f};
+    // Missing key is the PSP count. Increased doubles pedestrians and cars.
+    bool increased_spawn{false};
     std::uint32_t msaa{4u};
     std::uint32_t depth_precision{24u};
     std::uint32_t texture_cache_entries{8192u};
