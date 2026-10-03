@@ -27,21 +27,57 @@ int menu_keys() {
         return fail("toggle did not open");
     const HostSettingsView opened = host_settings_view();
     if (opened.selected != 0) return fail("initial selection");
-    const char *labels[]{"View distance", "Fullscreen", "Resolution", "FPS counter", "Frame rate"};
+    const char *labels[]{"View distance", "Fullscreen", "Resolution", "FPS counter", "Frame rate",
+                         "Spawn count"};
     for (const char *label : labels) {
         bool found = false;
         for (const char (&row)[48] : opened.rows)
             if (std::string(row).find(label) != std::string::npos) found = true;
         if (!found) return fail(label);
     }
+    if (std::string(opened.rows[5]).find("Original") == std::string::npos)
+        return fail("spawn count default");
     if (!host_settings_handle(HostSettingsKey::Up)) return fail("up");
     const int moved = host_settings_view().selected;
-    if (moved == opened.selected) return fail("up did not move");
+    if (moved != kHostSettingsRowCount - 1) return fail("up did not reach spawn count");
+    if (!host_settings_handle(HostSettingsKey::Right)) return fail("spawn right");
+    if (std::string(host_settings_view().rows[5]).find("Increased") == std::string::npos)
+        return fail("spawn count increased");
+    if (!host_settings_handle(HostSettingsKey::Left)) return fail("spawn left");
+    if (std::string(host_settings_view().rows[5]).find("Original") == std::string::npos)
+        return fail("spawn count original");
     if (!host_settings_handle(HostSettingsKey::Down)) return fail("down");
     if (host_settings_view().selected != opened.selected) return fail("down did not return");
     if (!host_settings_handle(HostSettingsKey::Close) || host_settings_open())
         return fail("close");
-    std::cout << "open=1 moved=" << moved << " returned=0 closed=1 rows=5\n";
+
+    const auto path = std::filesystem::temp_directory_path() / "lcs-spawn-count-test.ini";
+    {
+        std::ofstream out(path);
+        out << "[Rendering]\nSpawnCount=Increased\n";
+    }
+    const LcsConfiguration increased = load_lcs_render_configuration(path);
+    {
+        std::ofstream out(path);
+        out << "[Rendering]\nSpawnCount=original\n";
+    }
+    const LcsConfiguration original = load_lcs_render_configuration(path);
+    {
+        std::ofstream out(path);
+        out << "[Rendering]\nSpawnCount=double\n";
+    }
+    const LcsConfiguration bad = load_lcs_render_configuration(path);
+    std::filesystem::remove(path);
+    if (!increased.rendering.increased_spawn || !increased.warnings.empty())
+        return fail("spawn increased ini");
+    if (original.rendering.increased_spawn || !original.warnings.empty())
+        return fail("spawn original ini");
+    bool saw_warning = false;
+    for (const std::string &message : bad.warnings)
+        if (message.find("SpawnCount") != std::string::npos) saw_warning = true;
+    if (!saw_warning || bad.rendering.increased_spawn) return fail("spawn count warning");
+
+    std::cout << "open=1 moved=" << moved << " returned=0 closed=1 rows=6\n";
     return 0;
 }
 
@@ -63,6 +99,8 @@ int present_policy() {
         return fail("missing fps");
     if (std::string(open.settings.rows[4]).find("Frame rate") == std::string::npos)
         return fail("missing frame rate");
+    if (std::string(open.settings.rows[5]).find("Spawn count") == std::string::npos)
+        return fail("missing spawn count");
     std::vector<std::uint8_t> rgba(static_cast<std::size_t>(kSettingsOverlayWidth) *
                                    kSettingsOverlayHeight * 4u);
     rasterize_settings_overlay(open.settings, rgba.data(), kSettingsOverlayWidth, kSettingsOverlayHeight);
