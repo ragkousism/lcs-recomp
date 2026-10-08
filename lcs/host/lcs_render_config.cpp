@@ -306,6 +306,13 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
             warning(config, line, "Rendering.ViewDistance must be between 1 and 4");
         return;
     }
+    if (key == "spawncount") {
+        const std::string word = lowercase_copy(trim_copy(value));
+        if (word == "increased") config.rendering.increased_spawn = true;
+        else if (word == "original") config.rendering.increased_spawn = false;
+        else warning(config, line, "Rendering.SpawnCount expects Original or Increased");
+        return;
+    }
     if (key == "internalwidth") {
         if (!parse_u32(value, 480u, 16384u, config.rendering.internal_width))
             warning(config, line, "Rendering.InternalWidth must be between 480 and 16384");
@@ -581,11 +588,20 @@ float view_distance_scale() noexcept {
     return std::clamp(scale, 1.0f, 4.0f);
 }
 
+float spawn_count_scale() noexcept {
+    return lcs_render_configuration().rendering.increased_spawn ? 2.0f : 1.0f;
+}
+
 void lcs_set_view_distance(float value) noexcept {
     if (!std::isfinite(value)) return;
     value = std::clamp(value, 1.0f, 4.0f);
     std::lock_guard<std::mutex> guard(global_configuration_mutex());
     global_configuration().rendering.view_distance = value;
+}
+
+void lcs_set_increased_spawn(bool enabled) noexcept {
+    std::lock_guard<std::mutex> guard(global_configuration_mutex());
+    global_configuration().rendering.increased_spawn = enabled;
 }
 
 void lcs_set_fullscreen_setting(bool enabled) noexcept {

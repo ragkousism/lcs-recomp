@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -7875,6 +7876,7 @@ L_08A9F350:
     ctx.gpr[6] = (2229u << 16u);
     ctx.fpr[14] = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[6] + static_cast<std::uint32_t>(-17460)));
     { const float fs = ctx.fpr[13]; const float ft = ctx.fpr[14]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[13] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[13] = fs * ft; }
+    ctx.fpr[13] = ctx.fpr[13] * lcs::spawn_count_scale();
     ctx.set_fpu_condition((ctx.fpr[12] < ctx.fpr[13]));
     // nop
     { const bool branch_taken = !ctx.fpu_condition();
@@ -7903,6 +7905,7 @@ L_08A9F38C:
     ctx.gpr[4] = (ctx.gpr[4] + ctx.gpr[5]);
     ctx.gpr[5] = (2229u << 16u);
     ctx.gpr[5] = (aot_mem.aot_load32(ctx.gpr[5] + static_cast<std::uint32_t>(-17404)));
+    ctx.gpr[5] = static_cast<std::uint32_t>(lcs::scale_spawn_count(static_cast<std::int32_t>(ctx.gpr[5])));
     ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[4]) < static_cast<std::int32_t>(ctx.gpr[5]) ? 1u : 0u);
     { const bool branch_taken = ctx.gpr[4] == 0u;
     // nop
@@ -8118,6 +8121,9 @@ L_08A9F520:
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[14]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[20]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
     { const float fs = ctx.fpr[12]; const float ft = ctx.fpr[24]; if ((std::isinf(fs) && ft == 0.0f) || (std::isinf(ft) && fs == 0.0f)) ctx.fpr[12] = std::bit_cast<float>(0x7FC00000u); else ctx.fpr[12] = fs * ft; }
+    // Demand and cap together. A higher cap alone does nothing where the zone is the limit.
+    ctx.fpr[12] = ctx.fpr[12] * lcs::spawn_count_scale();
+    ctx.fpr[22] = ctx.fpr[22] * lcs::spawn_count_scale();
     ctx.set_fpu_condition((ctx.fpr[22] < ctx.fpr[12]));
     // nop
     if (ctx.fpu_condition()) {

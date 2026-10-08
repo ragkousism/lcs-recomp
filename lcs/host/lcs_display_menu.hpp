@@ -14,9 +14,11 @@ enum class HostSettingsKey {
     Close,
 };
 
+inline constexpr int kHostSettingsRowCount = 6;
+
 struct HostSettingsView {
     int selected{0};
-    char rows[5][48]{};
+    char rows[kHostSettingsRowCount][48]{};
     bool resolution_pending{false};
 };
 
