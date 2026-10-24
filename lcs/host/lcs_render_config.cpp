@@ -528,6 +528,10 @@ float building_lod_distance(float original) noexcept {
     return original * view_distance_scale();
 }
 
+float building_hd_scan_distance(float loaded) noexcept {
+    return building_lod_distance(loaded);
+}
+
 void lcs_set_view_distance(float value) noexcept {
     if (!std::isfinite(value)) return;
     value = std::clamp(value, 1.0f, 4.0f);

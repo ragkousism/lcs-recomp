@@ -978,6 +978,8 @@ L_08AAC01C:
     ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[5]) < static_cast<std::int32_t>(ctx.gpr[4]) ? 1u : 0u);
     ctx.gpr[5] = (17302u << 16u);
     ctx.fpr[22] = std::bit_cast<float>(ctx.gpr[5]);
+    // High-detail sector scan at 0x08AAC01C. Linear distance, guest 300.
+    ctx.fpr[22] = lcs::building_hd_scan_distance(ctx.fpr[22]);
     ctx.gpr[5] = (16928u << 16u);
     ctx.fpr[24] = std::bit_cast<float>(ctx.gpr[5]);
     ctx.gpr[18] = (ctx.gpr[2] + static_cast<std::uint32_t>(16));
@@ -3139,6 +3141,7 @@ L_08AACFFC:
 L_08AAD008:
     ctx.gpr[4] = (ctx.gpr[17] | 0u);
     ctx.gpr[31] = (0x08AAD014u);
+    // Raw camera distance. 0x08A8C144 multiplies model lod by TheCamera+224.
     ctx.fpr[12] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(ctx.fpr[20]));
     if (rt.invoke_chained_direct<&recomp_unit_0162_entry, 162u, 22u, 0x08A8C144u>(ctx, &aot_mem) && ctx.pc == 0x08AAD014u) goto L_08AAD014;
     return;
@@ -4649,6 +4652,8 @@ L_08AADB48:
     ctx.gpr[4] = (static_cast<std::int32_t>(ctx.gpr[5]) < static_cast<std::int32_t>(ctx.gpr[4]) ? 1u : 0u);
     ctx.gpr[5] = (17302u << 16u);
     ctx.fpr[24] = std::bit_cast<float>(ctx.gpr[5]);
+    // High-detail sector scan at 0x08AADB48. Linear distance, guest 300.
+    ctx.fpr[24] = lcs::building_hd_scan_distance(ctx.fpr[24]);
     ctx.gpr[5] = (16928u << 16u);
     ctx.fpr[26] = std::bit_cast<float>(ctx.gpr[5]);
     ctx.gpr[21] = (2232u << 16u);

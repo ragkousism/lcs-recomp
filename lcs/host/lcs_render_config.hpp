@@ -89,8 +89,12 @@ struct DisplaySurfaceDimensions {
     return count * 2;
 }
 
-// Linear high-detail building cutoff. Scale 1 returns original unchanged.
+// Linear building LOD distance. Scale 1 returns original unchanged.
 [[nodiscard]] float building_lod_distance(float original) noexcept;
+
+// High-detail sector scan. The guest loads 300 and calls this.
+// Scale 1 keeps 300; scale 2 and 4 scan out to 600 and 1200.
+[[nodiscard]] float building_hd_scan_distance(float loaded) noexcept;
 
 void lcs_set_view_distance(float value) noexcept;
 void lcs_set_increased_spawn(bool enabled) noexcept;
