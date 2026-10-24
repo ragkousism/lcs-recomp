@@ -1,7 +1,9 @@
 #include "lcs_render_config.hpp"
 
 #include <cmath>
+#include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 
 namespace {
@@ -15,20 +17,78 @@ bool same(float got, float want) {
     return std::isfinite(got) && got == want;
 }
 
+// Both guest loads of 300 must call the scan transform on that register.
+bool guest_scan_uses_transform(const std::string &source) {
+    const std::string needle = "(17302u << 16u)";
+    int sites = 0;
+    for (std::size_t pos = 0; (pos = source.find(needle, pos)) != std::string::npos; pos += needle.size()) {
+        const std::string window = source.substr(pos, 320);
+        const auto assigned = window.find("std::bit_cast<float>(ctx.gpr[5])");
+        const auto call = window.find("lcs::building_hd_scan_distance(");
+        if (assigned == std::string::npos || call == std::string::npos || call < assigned)
+            return false;
+        const auto reg = window.find("ctx.fpr[", assigned);
+        if (reg == std::string::npos || reg > call) return false;
+        const auto end = window.find(']', reg);
+        if (end == std::string::npos) return false;
+        const std::string fpr = window.substr(reg, end - reg + 1);
+        if (window.find(fpr, call) == std::string::npos) return false;
+        ++sites;
+    }
+    if (sites != 2) return false;
+    if (source.find("lcs::building_lod_distance(") == std::string::npos) return false;
+    int calls = 0;
+    const std::string name = "lcs::building_hd_scan_distance(";
+    for (std::size_t pos = 0; (pos = source.find(name, pos)) != std::string::npos; pos += name.size())
+        ++calls;
+    return calls == 2;
+}
+
+std::string read_guest() {
+    const std::string here = __FILE__;
+    const auto slash = here.find_last_of("/\\");
+    const std::string dir = slash == std::string::npos ? std::string{} : here.substr(0, slash);
+    const std::string path = dir + "/../lcs/generated/generated_unit_0170.cpp";
+    std::ifstream in(path);
+    if (!in) return {};
+    return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
+}
+
 int building_lod() {
     using namespace lcs;
-    const float originals[]{330.0f, 300.0f, 100.0f};
+    const std::string guest = read_guest();
+    if (guest.empty()) return fail("guest scan file");
+    if (!guest_scan_uses_transform(guest)) return fail("guest scan still uses raw 300");
+
     const float scales[]{1.0f, 2.0f, 4.0f};
     for (const float scale : scales) {
         lcs_set_view_distance(scale);
         if (view_distance_scale() != scale) return fail("view distance scale");
-        for (const float original : originals) {
-            const float got = building_lod_distance(original);
-            if (!same(got, original * scale)) return fail("building lod distance");
-        }
+        const float scan = building_hd_scan_distance(300.0f);
+        if (!same(scan, 300.0f * scale)) return fail("building scan distance");
+        // Included at the limit, excluded just past it.
+        if (scan < 300.0f * scale) return fail("scan short of limit");
+        if (300.0f * scale + 1.0f <= scan) return fail("scan past limit");
+        // Close-range model lod. GetAtomicFromDistance compares the raw camera
+        // distance with model_lod * TheCamera+224, and +224 already includes
+        // this scale, so the high-detail range is the same helper.
+        const float model = building_lod_distance(100.0f);
+        if (!same(model, 100.0f * scale)) return fail("close model range");
+        if (!(model <= scan)) return fail("close range outside scan");
+        if (!same(building_lod_distance(330.0f), 330.0f * scale)) return fail("building cutoff");
     }
+
     lcs_set_view_distance(1.0f);
-    std::cout << "building_lod pass 330/300/100 at 1,2,4\n";
+    if (600.0f <= building_hd_scan_distance(300.0f)) return fail("scale 1 reaches 600");
+    lcs_set_view_distance(2.0f);
+    if (!(600.0f <= building_hd_scan_distance(300.0f))) return fail("scale 2 misses 600");
+    if (1200.0f <= building_hd_scan_distance(300.0f)) return fail("scale 2 reaches 1200");
+    lcs_set_view_distance(4.0f);
+    if (!(1200.0f <= building_hd_scan_distance(300.0f))) return fail("scale 4 misses 1200");
+    if (1200.0f + 1.0f <= building_hd_scan_distance(300.0f)) return fail("scale 4 past 1200");
+
+    lcs_set_view_distance(1.0f);
+    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4\n";
     return 0;
 }
 
