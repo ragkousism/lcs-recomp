@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -3055,6 +3056,8 @@ L_08AACF60:
     ctx.fpr[20] = std::bit_cast<float>(ctx.gpr[4]);
     ctx.gpr[4] = (17317u << 16u);
     ctx.fpr[12] = std::bit_cast<float>(ctx.gpr[4]);
+    // Building high-detail cutoff at 0x08AACF60. Linear distance, guest 330.
+    ctx.fpr[12] = lcs::building_lod_distance(ctx.fpr[12]);
     ctx.set_fpu_condition((ctx.fpr[20] <= ctx.fpr[12]));
     // nop
     { const bool branch_taken = ctx.fpu_condition();

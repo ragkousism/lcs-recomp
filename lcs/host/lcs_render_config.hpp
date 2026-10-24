@@ -89,6 +89,9 @@ struct DisplaySurfaceDimensions {
     return count * 2;
 }
 
+// Linear high-detail building cutoff. Scale 1 returns original unchanged.
+[[nodiscard]] float building_lod_distance(float original) noexcept;
+
 void lcs_set_view_distance(float value) noexcept;
 void lcs_set_increased_spawn(bool enabled) noexcept;
 void lcs_set_fullscreen_setting(bool enabled) noexcept;

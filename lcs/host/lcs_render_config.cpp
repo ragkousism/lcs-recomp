@@ -524,6 +524,10 @@ float spawn_count_scale() noexcept {
     return lcs_render_configuration().rendering.increased_spawn ? 2.0f : 1.0f;
 }
 
+float building_lod_distance(float original) noexcept {
+    return original * view_distance_scale();
+}
+
 void lcs_set_view_distance(float value) noexcept {
     if (!std::isfinite(value)) return;
     value = std::clamp(value, 1.0f, 4.0f);
