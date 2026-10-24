@@ -77,6 +77,9 @@ struct DisplaySurfaceDimensions {
 
 [[nodiscard]] float view_distance_scale() noexcept;
 
+// Linear high-detail building cutoff. Scale 1 returns original unchanged.
+[[nodiscard]] float building_lod_distance(float original) noexcept;
+
 void lcs_set_view_distance(float value) noexcept;
 void lcs_set_fullscreen_setting(bool enabled) noexcept;
 void lcs_set_show_fps(bool enabled) noexcept;

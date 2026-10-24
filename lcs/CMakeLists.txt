@@ -133,3 +133,15 @@ if(WIN32)
 else()
     target_link_libraries(lcs_host_menu_test PRIVATE PkgConfig::SDL2 Threads::Threads)
 endif()
+
+add_executable(lcs_building_lod_test
+    ${CMAKE_SOURCE_DIR}/tests/lcs_building_lod_test.cpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/host/lcs_render_config.cpp)
+target_include_directories(lcs_building_lod_test PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/host
+    ${CMAKE_SOURCE_DIR}/include)
+if(WIN32)
+    target_link_libraries(lcs_building_lod_test PRIVATE user32)
+else()
+    target_link_libraries(lcs_building_lod_test PRIVATE PkgConfig::SDL2 Threads::Threads)
+endif()
