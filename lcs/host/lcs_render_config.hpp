@@ -84,6 +84,9 @@ struct DisplaySurfaceDimensions {
 // Scale 1 keeps 300; scale 2 and 4 scan out to 600 and 1200.
 [[nodiscard]] float building_hd_scan_distance(float loaded) noexcept;
 
+// camera_multiplier is TheCamera+224 and already includes ViewDistance.
+[[nodiscard]] bool building_lod_hidden(float dist, float near_unscaled, float camera_multiplier) noexcept;
+
 void lcs_set_view_distance(float value) noexcept;
 void lcs_set_fullscreen_setting(bool enabled) noexcept;
 void lcs_set_show_fps(bool enabled) noexcept;

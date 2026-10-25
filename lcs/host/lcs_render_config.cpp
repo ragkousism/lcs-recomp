@@ -521,6 +521,12 @@ float building_hd_scan_distance(float loaded) noexcept {
     return building_lod_distance(loaded);
 }
 
+bool building_lod_hidden(float dist, float near_unscaled, float camera_multiplier) noexcept {
+    const float near_dist = near_unscaled * camera_multiplier;
+    const float limit = 300.0f * camera_multiplier;
+    return dist < near_dist && dist < limit;
+}
+
 void lcs_set_view_distance(float value) noexcept {
     if (!std::isfinite(value)) return;
     value = std::clamp(value, 1.0f, 4.0f);
