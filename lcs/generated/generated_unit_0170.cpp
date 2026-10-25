@@ -3056,6 +3056,30 @@ L_08AACF60:
       ctx.write_vfpu_vector_with_destination_prefix_ct<28u, 1u>(vfpu_d); }
     ctx.gpr[4] = (ctx.vfpu_scalar_bits_ct<28u>());
     ctx.fpr[20] = std::bit_cast<float>(ctx.gpr[4]);
+    // Big-building LOD hides inside lod[2] * TheCamera+224. +224 already includes ViewDistance.
+    {
+        const std::uint32_t model_flags = aot_mem.aot_load16(ctx.gpr[17] + static_cast<std::uint32_t>(54));
+        if ((model_flags & 16u) != 0u) {
+            const float near_unscaled = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(48)));
+            ctx.gpr[4] = (2232u << 16u);
+            ctx.gpr[4] = (ctx.gpr[4] + static_cast<std::uint32_t>(12960));
+            const float camera_multiplier = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[4] + static_cast<std::uint32_t>(224)));
+            if (lcs::building_lod_hidden(ctx.fpr[20], near_unscaled, camera_multiplier)) {
+                const std::uint32_t related = aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(56));
+                bool hide = related == 0u;
+                if (related != 0u) {
+                    const std::uint32_t atomics = aot_mem.aot_load32(related + static_cast<std::uint32_t>(36));
+                    const std::uint32_t atomic0 = atomics == 0u ? 0u : aot_mem.aot_load32(atomics);
+                    const std::uint32_t alpha = aot_mem.aot_load8(related + static_cast<std::uint32_t>(53));
+                    hide = atomic0 != 0u && alpha == 255u;
+                }
+                if (hide) {
+                    ctx.gpr[2] = (0u | 0u);
+                    goto L_08AAD358;
+                }
+            }
+        }
+    }
     ctx.gpr[4] = (17317u << 16u);
     ctx.fpr[12] = std::bit_cast<float>(ctx.gpr[4]);
     // Building high-detail cutoff at 0x08AACF60. Linear distance, guest 330.

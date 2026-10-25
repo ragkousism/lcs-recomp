@@ -44,6 +44,28 @@ bool guest_scan_uses_transform(const std::string &source) {
     return calls == 2;
 }
 
+// The near hide sits on the sqrt distance, before the 330 cutoff, and does not
+// store the spawn/removal multiplier at camera offset 228.
+bool guest_near_hide_uses_transform(const std::string &source) {
+    const auto label = source.find("L_08AACF60:");
+    if (label == std::string::npos) return false;
+    const auto cutoff = source.find("lcs::building_lod_distance(", label);
+    if (cutoff == std::string::npos) return false;
+    const std::string window = source.substr(label, cutoff - label);
+    const auto dist = window.find("ctx.fpr[20] = std::bit_cast<float>(ctx.gpr[4]);");
+    const auto call = window.find("lcs::building_lod_hidden(ctx.fpr[20],");
+    if (dist == std::string::npos || call == std::string::npos || call < dist) return false;
+    if (window.find("static_cast<std::uint32_t>(48)") == std::string::npos) return false;
+    if (window.find("static_cast<std::uint32_t>(224)") == std::string::npos) return false;
+    if (window.find("& 16u") == std::string::npos) return false;
+    if (window.find("static_cast<std::uint32_t>(228)") != std::string::npos) return false;
+    if (window.find("aot_store32") != std::string::npos) return false;
+    if (source.find("lcs::building_lod_hidden(") != call + label) return false;
+    const auto again = source.find("lcs::building_lod_hidden(", call + label + 1);
+    if (again != std::string::npos) return false;
+    return source.find("ctx.fpr[12] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(ctx.fpr[20]));") != std::string::npos;
+}
+
 std::string read_guest() {
     const std::string here = __FILE__;
     const auto slash = here.find_last_of("/\\");
@@ -59,6 +81,7 @@ int building_lod() {
     const std::string guest = read_guest();
     if (guest.empty()) return fail("guest scan file");
     if (!guest_scan_uses_transform(guest)) return fail("guest scan still uses raw 300");
+    if (!guest_near_hide_uses_transform(guest)) return fail("guest near hide");
 
     const float scales[]{1.0f, 2.0f, 4.0f};
     for (const float scale : scales) {
@@ -87,8 +110,24 @@ int building_lod() {
     if (!(1200.0f <= building_hd_scan_distance(300.0f))) return fail("scale 4 misses 1200");
     if (1200.0f + 1.0f <= building_hd_scan_distance(300.0f)) return fail("scale 4 past 1200");
 
+    // Disappearing distance is lod[2] times the passed multiplier. ViewDistance
+    // is already inside that multiplier, so scale 4 must not move a multiplier of 1.
+    lcs_set_view_distance(4.0f);
+    if (!building_lod_hidden(99.0f, 100.0f, 1.0f)) return fail("hide 99 at multiplier 1");
+    if (building_lod_hidden(100.0f, 100.0f, 1.0f)) return fail("near hide scales twice");
+    if (building_lod_hidden(200.0f, 100.0f, 1.0f)) return fail("near hide scales twice");
     lcs_set_view_distance(1.0f);
-    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4\n";
+    if (!building_lod_hidden(99.0f, 100.0f, 1.0f)) return fail("hide 99");
+    if (building_lod_hidden(100.0f, 100.0f, 1.0f)) return fail("keep 100");
+    if (!building_lod_hidden(399.0f, 100.0f, 4.0f)) return fail("hide 399");
+    if (building_lod_hidden(400.0f, 100.0f, 4.0f)) return fail("keep 400");
+    if (!building_lod_hidden(299.0f, 400.0f, 1.0f)) return fail("cap hides 299");
+    if (building_lod_hidden(300.0f, 400.0f, 1.0f)) return fail("cap keeps 300");
+    if (!building_lod_hidden(1199.0f, 400.0f, 4.0f)) return fail("cap hides 1199");
+    if (building_lod_hidden(1200.0f, 400.0f, 4.0f)) return fail("cap keeps 1200");
+
+    lcs_set_view_distance(1.0f);
+    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400\n";
     return 0;
 }
 
