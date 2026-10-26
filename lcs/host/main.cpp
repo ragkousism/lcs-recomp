@@ -51,7 +51,8 @@ int main(int argc, char **argv) {
 
         auto elf = psprecomp::Elf32Image::from_file(elf_path);
 
-        psprecomp::Runtime runtime;
+        // Heaps are created once from this map. ViewDistance 1 stays at 32 MiB.
+        psprecomp::Runtime runtime(lcs::guest_ram_bytes());
         runtime.set_game_root(game_root);
 
         const auto stats = elf.load_and_relocate(runtime.memory(), psprecomp::kDefaultPspUserLoadBase);

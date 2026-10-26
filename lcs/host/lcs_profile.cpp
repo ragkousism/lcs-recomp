@@ -1864,13 +1864,17 @@ void ge_worker_shutdown() {
 
 void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start) {
     thread_table = ThreadTable{};
+    // Stacks grow down from the end of this map. 32 MiB still ends at 0x0A000000.
+    const std::uint32_t stack_ceiling =
+        psprecomp::GuestMemory::kPhysicalBase + runtime.memory().size();
+    thread_table.next_stack_top = stack_ceiling;
     lcs_menu_init(runtime);
 
     ThreadRecord module_thread{};
     module_thread.name = "module_start";
     module_thread.priority = 32u;
     module_thread.stack_size = 0x10000u;
-    module_thread.stack_top = 0x0A000000u;
+    module_thread.stack_top = stack_ceiling;
     module_thread.stack_bottom = module_thread.stack_top - module_thread.stack_size;
     module_thread.kernel_context = module_thread.stack_top - 0x100u;
     thread_table.next_stack_top = module_thread.stack_bottom;

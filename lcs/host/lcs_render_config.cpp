@@ -513,6 +513,12 @@ float view_distance_scale() noexcept {
     return std::clamp(scale, 1.0f, 4.0f);
 }
 
+std::uint32_t guest_ram_bytes() noexcept {
+    constexpr std::uint32_t kGuestRam32 = 32u * 1024u * 1024u;
+    constexpr std::uint32_t kGuestRam64 = 64u * 1024u * 1024u;
+    return view_distance_scale() > 1.0f ? kGuestRam64 : kGuestRam32;
+}
+
 float building_lod_distance(float original) noexcept {
     return original * view_distance_scale();
 }

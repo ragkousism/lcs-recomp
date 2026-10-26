@@ -77,6 +77,9 @@ struct DisplaySurfaceDimensions {
 
 [[nodiscard]] float view_distance_scale() noexcept;
 
+// ViewDistance 1 keeps 32 MiB. Above that, GuestMemory's 64 MiB map.
+[[nodiscard]] std::uint32_t guest_ram_bytes() noexcept;
+
 // Linear building LOD distance. Scale 1 returns original unchanged.
 [[nodiscard]] float building_lod_distance(float original) noexcept;
 
