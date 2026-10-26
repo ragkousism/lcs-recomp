@@ -80,6 +80,9 @@ struct DisplaySurfaceDimensions {
 // ViewDistance 1 keeps 32 MiB. Above that, GuestMemory's 64 MiB map.
 [[nodiscard]] std::uint32_t guest_ram_bytes() noexcept;
 
+// Guest 0x08B5650C. Above the 32 MiB map's free gap, that gap stays the main heap.
+[[nodiscard]] std::uint32_t main_heap_reserve(std::uint32_t measured_free) noexcept;
+
 // Linear building LOD distance. Scale 1 returns original unchanged.
 [[nodiscard]] float building_lod_distance(float original) noexcept;
 

@@ -519,6 +519,13 @@ std::uint32_t guest_ram_bytes() noexcept {
     return view_distance_scale() > 1.0f ? kGuestRam64 : kGuestRam32;
 }
 
+std::uint32_t main_heap_reserve(std::uint32_t measured_free) noexcept {
+    constexpr std::uint32_t kScale1Free = 0x0118AC00u;
+    constexpr std::uint32_t kGameReserve = 192u << 16u;
+    if (measured_free <= kScale1Free) return kGameReserve;
+    return measured_free - kScale1Free;
+}
+
 float building_lod_distance(float original) noexcept {
     return original * view_distance_scale();
 }

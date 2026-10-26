@@ -1,5 +1,6 @@
 #include "psprecomp/runtime.hpp"
 #include "generated_units.hpp"
+#include "lcs_render_config.hpp"
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -2204,7 +2205,8 @@ L_08AA4BFC:
       goto L_08AA4C0C;
     }
 L_08AA4C0C:
-    ctx.gpr[4] = (192u << 16u);
+    // 0x08B5650C keeps the 32 MiB map's main-heap size.
+    ctx.gpr[4] = lcs::main_heap_reserve(ctx.gpr[2]);
     aot_mem.aot_store32(ctx.gpr[17] + static_cast<std::uint32_t>(25900), ctx.gpr[4]);
     goto L_08AA4C14;
 L_08AA4C14:
