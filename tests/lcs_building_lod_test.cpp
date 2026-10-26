@@ -82,15 +82,16 @@ std::string read_text(const std::string &relative) {
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
-// The 12 MiB reserve stays the game's immediate. Raising it shrinks the main heap.
-bool guest_reserve_unchanged(const std::string &source) {
+// The store at L_08AA4C0C uses the free sample in gpr[2]. The 12 MiB immediate is gone.
+bool guest_reserve_follows_free(const std::string &source) {
     const auto label = source.find("L_08AA4C0C:");
     const auto next = source.find("L_08AA4C14:", label);
     if (label == std::string::npos || next == std::string::npos) return false;
     const std::string window = source.substr(label, next - label);
-    if (window.find("ctx.gpr[4] = (192u << 16u);") == std::string::npos) return false;
+    if (window.find("lcs::main_heap_reserve(ctx.gpr[2])") == std::string::npos) return false;
     if (window.find("static_cast<std::uint32_t>(25900)") == std::string::npos) return false;
-    return window.find("lcs::") == std::string::npos;
+    if (window.find("192u << 16u") != std::string::npos) return false;
+    return window.find("0x02C00000") == std::string::npos;
 }
 
 // One size is stored, passed to CreateFpl, and passed to the heap initializer.
@@ -133,7 +134,7 @@ int building_lod() {
     if (!guest_scan_uses_transform(guest)) return fail("guest scan still uses raw 300");
     if (!guest_near_hide_uses_transform(guest)) return fail("guest near hide");
     const std::string heap = read_text("../lcs/generated/generated_unit_0168.cpp");
-    if (heap.empty() || !guest_reserve_unchanged(heap)) return fail("guest reserve store");
+    if (heap.empty() || !guest_reserve_follows_free(heap)) return fail("guest reserve store");
     const std::string profile = read_text("../lcs/host/lcs_profile.cpp");
     if (profile.empty() || !profile_stack_follows_map(profile)) return fail("stack ceiling");
     const std::string streaming = read_text("../lcs/generated/generated_unit_0129.cpp");
@@ -225,17 +226,25 @@ int building_lod() {
     const std::uint32_t stack32 = (0x08000000u + kRam32 - 0x10000u) & ~0xFFu;
     if (low + stream32 > stack32) return fail("scale 1 streaming past stack");
 
-    // If the main heap were first, 64 MiB crosses 22 MiB and the game's own
-    // 12 MiB reserve applies. That heap must not shrink below the 32 MiB size.
-    const std::uint32_t main32 = free32;
-    const std::uint32_t main64 = free64 - kOriginalReserve;
-    if (main64 < main32) return fail("main heap shrank");
-    if (kOriginalReserve < 0x00800000u) return fail("reserve pad");
-    const std::uint32_t stream_after_main = kOriginalReserve - kStreamPad;
+    // The store runs only when free exceeds 22 MiB. The surplus over the 32 MiB
+    // map's gap stays free for StreamingHeap, and the main heap stays that gap.
+    if (free32 != 0x0118AC00u) return fail("scale 1 free");
+    if (main_heap_reserve(free32) != kOriginalReserve) return fail("scale 1 reserve");
+    if (main_heap_reserve(0u) != kOriginalReserve) return fail("empty reserve");
+    const std::uint32_t reserve64 = main_heap_reserve(free64);
+    if (reserve64 != free64 - free32) return fail("grown reserve");
+    if (!(reserve64 < free64)) return fail("reserve consumes sample");
+    const std::uint32_t main64 = free64 - reserve64;
+    if (main64 != free32) return fail("main heap moved");
+    const std::uint32_t leftover = free64 - main64;
+    if (leftover < 0x00800000u) return fail("reserve pad");
+    const std::uint32_t stream_after_main = leftover - kStreamPad;
+    if (stream_after_main <= stream32) return fail("main-first stream did not grow");
     if (low + main64 + stream_after_main > stack64) return fail("reserve path past stack");
+    if (low + main64 + stream_after_main > 0x08000000u + kRam64) return fail("reserve path past ram");
 
     lcs_set_view_distance(1.0f);
-    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400 stream +32 MiB\n";
+    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400 stream +32 MiB reserve keeps main\n";
     return 0;
 }
 
