@@ -20,6 +20,8 @@ void lcs_set_free_aim(bool active) noexcept;
 [[nodiscard]] bool lcs_host_accelerate() noexcept;
 [[nodiscard]] bool lcs_host_brake() noexcept;
 void lcs_set_host_drive_inputs(bool accelerate, bool brake) noexcept;
+void lcs_suppress_mouse_camera() noexcept;
+void lcs_control_use_host_publishers() noexcept;
 void lcs_note_vehicle_control_read() noexcept;
 [[nodiscard]] bool lcs_player_in_vehicle() noexcept;
 

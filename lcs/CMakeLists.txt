@@ -133,3 +133,25 @@ if(WIN32)
 else()
     target_link_libraries(lcs_host_menu_test PRIVATE PkgConfig::SDL2 Threads::Threads)
 endif()
+
+if(PSPRECOMP_BUILD_TESTS)
+    add_executable(lcs_control_test
+        ${CMAKE_SOURCE_DIR}/tests/lcs_control_test.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/host/lcs_control.cpp)
+    target_include_directories(lcs_control_test PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/host
+        ${CMAKE_SOURCE_DIR}/include)
+    if(NOT WIN32)
+        target_link_libraries(lcs_control_test PRIVATE Threads::Threads)
+    endif()
+    add_test(NAME lcs_control_test COMMAND lcs_control_test)
+    if(NOT WIN32)
+        add_executable(lcs_control_endpoint
+            ${CMAKE_SOURCE_DIR}/tests/lcs_control_endpoint.cpp
+            ${CMAKE_CURRENT_SOURCE_DIR}/host/lcs_control.cpp)
+        target_include_directories(lcs_control_endpoint PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/host
+            ${CMAKE_SOURCE_DIR}/include)
+        target_link_libraries(lcs_control_endpoint PRIVATE Threads::Threads)
+    endif()
+endif()

@@ -1,0 +1,179 @@
+// Architecture of the LCSNative control surface.
+// Render with: python3 lcs/scripts/render_control_graph.py
+
+digraph control_surface {
+    rankdir=TB;
+    bgcolor="white";
+    pad=0.35;
+    nodesep=0.38;
+    ranksep=0.52;
+    splines=true;
+    fontname="DejaVu Sans";
+    label="LCSNative control surface";
+    labelloc=t;
+    fontsize=20;
+    fontcolor="#0f172a";
+
+    node [
+        fontname="DejaVu Sans",
+        fontsize=12,
+        shape=box,
+        style="rounded,filled",
+        color="#334155",
+        penwidth=1.3,
+        margin="0.16,0.10"
+    ];
+    edge [
+        fontname="DejaVu Sans",
+        fontsize=10,
+        color="#475569",
+        arrowsize=0.75
+    ];
+
+    subgraph cluster_outside {
+        label="Other process";
+        fontname="DejaVu Sans";
+        fontsize=13;
+        color="#94a3b8";
+        style=filled;
+        fillcolor="#f8fafc";
+        Client [
+            label="lcs_control.py\nfixed script or LLM",
+            fillcolor="#e0f2fe"
+        ];
+    }
+
+    subgraph cluster_proc {
+        label="LCSNative";
+        fontname="DejaVu Sans";
+        fontsize=13;
+        color="#64748b";
+        style=filled;
+        fillcolor="#ffffff";
+
+        subgraph cluster_io {
+            label="I/O thread";
+            fontname="DejaVu Sans";
+            fontsize=12;
+            color="#93c5fd";
+            style=filled;
+            fillcolor="#f8fbff";
+            Sock [
+                label="Unix socket\none client\none JSON record at a time",
+                fillcolor="#dbeafe"
+            ];
+            IO [
+                label="hello, act, observe, release",
+                fillcolor="#dbeafe"
+            ];
+        }
+
+        subgraph cluster_state {
+            label="Shared state";
+            fontname="DejaVu Sans";
+            fontsize=12;
+            color="#fbbf24";
+            style=filled;
+            fillcolor="#fffbeb";
+            Latch [
+                label="Latch\naction masks, deadline, seq",
+                fillcolor="#fef3c7"
+            ];
+            Snap [
+                label="Snapshot\nread_seq, applied_seq\npose, running",
+                fillcolor="#fef3c7"
+            ];
+        }
+
+        subgraph cluster_cpu {
+            label="CPU thread";
+            fontname="DejaVu Sans";
+            fontsize=12;
+            color="#86efac";
+            style=filled;
+            fillcolor="#f0fdf4";
+            SDL [
+                label="display_window_input\nkeyboard, mouse, pad\lcontrol off: publishes camera and throttle\lcontrol on: records the physical sample",
+                fillcolor="#dcfce7"
+            ];
+            Read [
+                label="sceCtrlReadBufferPositive",
+                fillcolor="#dcfce7"
+            ];
+            Apply [
+                label="control_surface_apply\nonly publisher while control is on",
+                fillcolor="#bbf7d0"
+            ];
+            Vblank [
+                label="wait_vblank",
+                fillcolor="#dcfce7"
+            ];
+            Guest [
+                label="Guest pad sample",
+                fillcolor="#f1f5f9"
+            ];
+            Axes [
+                label="Camera axes\naccelerate / brake",
+                fillcolor="#f1f5f9"
+            ];
+        }
+    }
+
+    Client -> Sock [dir=both, label=" SEQPACKET "];
+    Sock -> IO [dir=both];
+    IO -> Latch [dir=both];
+    IO -> Snap [label=" observe reads this "];
+    SDL -> Read [label=" physical sample "];
+    Read -> Apply;
+    Latch -> Apply [label=" copy under the lock "];
+    Apply -> Guest;
+    Apply -> Axes;
+    Apply -> Snap [label=" read_seq, applied_seq, pose "];
+    Vblank -> Snap [label=" running, vblank "];
+}
+
+digraph command_sequence {
+    rankdir=LR;
+    bgcolor="white";
+    pad=0.4;
+    nodesep=0.32;
+    ranksep=0.48;
+    splines=true;
+    fontname="DejaVu Sans";
+    label="One command, then the sample that proves it";
+    labelloc=t;
+    fontsize=20;
+    fontcolor="#0f172a";
+
+    node [
+        fontname="DejaVu Sans",
+        fontsize=12,
+        shape=box,
+        style="rounded,filled",
+        color="#334155",
+        penwidth=1.3,
+        margin="0.14,0.10"
+    ];
+    edge [
+        fontname="DejaVu Sans",
+        fontsize=10,
+        color="#475569",
+        arrowsize=0.75
+    ];
+
+    hello [label="1  hello", fillcolor="#dbeafe"];
+    session [label="2  session open\nactions, running, vblank", fillcolor="#dbeafe"];
+    before [label="3  observe\nread_seq = R", fillcolor="#fef3c7"];
+    act [label="4  act\nMoveForward + Sprint\nseq = N", fillcolor="#dbeafe"];
+    note [
+        label="The act reply means\nthe latch accepted N.\nThe guest has not\nsampled it yet.",
+        shape=note,
+        fillcolor="#f8fafc"
+    ];
+    sample [label="5  CPU thread copies\nthe latch and writes\nthe guest pad", fillcolor="#dcfce7"];
+    taken [label="6  snapshot\nread_seq = R+1\napplied_seq = N", fillcolor="#fef3c7"];
+    later [label="7  later observe\nread_seq moved and\napplied_seq = N", fillcolor="#bbf7d0"];
+
+    hello -> session -> before -> act -> sample -> taken -> later;
+    act -> note [style=dashed, arrowhead=none, constraint=false];
+}

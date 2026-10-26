@@ -7,6 +7,8 @@
 #include "ge_gpu_backend.hpp"
 #include "ge_renderer.hpp"
 #include "lcs_render_config.hpp"
+#include "lcs_control.hpp"
+#include "lcs_controls.hpp"
 
 #include <algorithm>
 #include <cstdint>
@@ -26,6 +28,10 @@ int main(int argc, char **argv) {
     std::filesystem::path game_root = "game";
     std::uint64_t max_dispatches = std::numeric_limits<std::uint64_t>::max();
     double max_seconds = 0.0;
+    enum class ControlMode { Absent, Off, On };
+    ControlMode control_mode = ControlMode::Absent;
+    std::string control_cli_path;
+    bool control_cli = false;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--game" && i + 1 < argc) {
@@ -37,11 +43,40 @@ int main(int argc, char **argv) {
             max_dispatches = std::strtoull(argv[++i], nullptr, 0);
         } else if (arg == "--max-seconds" && i + 1 < argc) {
             max_seconds = std::strtod(argv[++i], nullptr);
+        } else if (arg == "--control") {
+            control_cli = true;
+            if (i + 1 < argc) {
+                const std::string_view next = argv[i + 1];
+                if (!next.empty() && next.front() != '-') {
+                    ++i;
+                    if (next == "off") control_mode = ControlMode::Off;
+                    else {
+                        control_mode = ControlMode::On;
+                        control_cli_path = std::string(next);
+                    }
+                    continue;
+                }
+            }
+            control_mode = ControlMode::On;
         } else {
             std::cerr << "Ignoring unrecognised argument \"" << arg << "\"\n";
         }
     }
 
+#if defined(_WIN32)
+    if (control_cli) {
+        std::cerr << "control surface is Linux-only\n";
+        return 2;
+    }
+#else
+    (void)control_cli;
+    if (!control_cli_path.empty() && !std::filesystem::path(control_cli_path).is_absolute()) {
+        std::cerr << "[control] socket path must be absolute\n";
+        return 2;
+    }
+#endif
+
+    bool control_started = false;
     try {
         std::error_code executable_error;
         const std::filesystem::path executable_directory =
@@ -93,7 +128,32 @@ int main(int argc, char **argv) {
 
         const std::uint32_t entry = elf.runtime_entry(psprecomp::kDefaultPspUserLoadBase);
         std::cout << "Running from entry " << psprecomp::hex32(entry) << "\n" << std::flush;
+
+#if !defined(_WIN32)
+        bool start_control = false;
+        std::string control_path;
+        if (control_mode == ControlMode::On) {
+            start_control = true;
+            control_path = control_cli_path.empty() ? lcs::control_default_socket_path() : control_cli_path;
+        } else if (control_mode == ControlMode::Absent &&
+                   lcs::lcs_render_configuration().control.enabled) {
+            start_control = true;
+            const std::string &configured = lcs::lcs_render_configuration().control.socket;
+            control_path = configured.empty() ? lcs::control_default_socket_path() : configured;
+        }
+        if (start_control) {
+            lcs::lcs_control_use_host_publishers();
+            if (!lcs::control_surface_start(control_path)) return 2;
+            control_started = true;
+            std::cerr << "[control] not isolating saves under " << game_root.string() << '\n';
+        }
+#endif
+
         runtime.run(entry, max_dispatches);
+        if (control_started) {
+            lcs::control_surface_stop();
+            control_started = false;
+        }
         lcs::ge_worker_shutdown();
 
         if (runtime.stopped()) {
@@ -101,6 +161,7 @@ int main(int argc, char **argv) {
         }
         lcs::audio_output_shutdown();
     } catch (const std::exception &ex) {
+        if (control_started) lcs::control_surface_stop();
         std::cerr << "LCSNative error: " << ex.what() << "\n";
         return 1;
     }

@@ -12,6 +12,9 @@
 #include "lcs_frame_limit.hpp"
 #include "lcs_lang.hpp"
 #include "lcs_menu.hpp"
+#include "lcs_control.hpp"
+#include "lcs_controls.hpp"
+#include "lcs_display_menu.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -1814,12 +1817,14 @@ void present_frame(psprecomp::Runtime &rt, const PresentRequest &request) {
         const GeGpuBackendReport gpu = ge_gpu_backend_report();
         const std::span<const std::byte> rgba = ge_gpu_backend_game_frame_rgba();
         if (!rgba.empty()) {
+            if (control_surface_enabled()) control_bind_present_vblank(request.vblank);
             display_window_present_rgba(rgba, gpu.offscreen_width, gpu.offscreen_height);
             ge_gpu_backend_mark_window_presented();
             presented_gpu_frame = true;
         }
     }
     if (!presented_gpu_frame) {
+        if (control_surface_enabled()) control_bind_present_vblank(request.vblank);
         display_window_present(rt, present_buffer, present_stride, request.pixel_format,
                                present_width, present_height);
     }
@@ -1833,6 +1838,47 @@ void check_wall_clock_limit(psprecomp::Runtime &runtime, std::uint64_t sample_ma
         std::chrono::steady_clock::now() - wall_clock_start;
     if (elapsed.count() < wall_clock_limit_seconds) return;
     runtime.stop("Wall-clock limit reached at " + psprecomp::hex32(runtime.cpu().pc));
+}
+
+std::int64_t control_clock_ms() noexcept {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(
+               std::chrono::steady_clock::now().time_since_epoch())
+        .count();
+}
+
+bool guest_contains(void *ctx, std::uint32_t address, std::uint32_t size) noexcept {
+    auto *memory = static_cast<psprecomp::GuestMemory *>(ctx);
+    return memory->contains(address, size) && memory->raw_pointer(address, size) != nullptr;
+}
+
+std::uint8_t guest_load8(void *ctx, std::uint32_t address) noexcept {
+    auto *memory = static_cast<psprecomp::GuestMemory *>(ctx);
+    const std::uint8_t *bytes = memory->raw_pointer(address, 1u);
+    return bytes != nullptr ? bytes[0] : 0u;
+}
+
+std::uint32_t guest_load32(void *ctx, std::uint32_t address) noexcept {
+    auto *memory = static_cast<psprecomp::GuestMemory *>(ctx);
+    const std::uint8_t *bytes = memory->raw_pointer(address, 4u);
+    if (bytes == nullptr) return 0u;
+    std::uint32_t value = 0u;
+    std::memcpy(&value, bytes, sizeof value);
+    return value;
+}
+
+void note_control_vblank(psprecomp::Runtime &rt) noexcept {
+    if (!control_surface_enabled()) return;
+    control_note_vblank(display_vblank_index, rt.stopped(), rt.stop_reason(),
+                        display_window_closed(), control_clock_ms());
+}
+
+ControlMemory guest_control_memory(psprecomp::Runtime &rt) noexcept {
+    ControlMemory memory;
+    memory.ctx = &rt.memory();
+    memory.contains = guest_contains;
+    memory.load8 = guest_load8;
+    memory.load32 = guest_load32;
+    return memory;
 }
 
 void lcs_starvation_tick(psprecomp::Runtime &starvation_runtime, psprecomp::AllegrexContext &ctx) {
@@ -3161,7 +3207,21 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 ctx.set_gpr(2, 0x80000103u);
                 return;
             }
-            const HostInputState host = display_window_input();
+            const HostInputState physical = display_window_input();
+            HostInputState host = physical;
+            if (control_surface_enabled()) {
+                ControlApplyContext apply_ctx;
+                control_read_sample_note(apply_ctx);
+                apply_ctx.now_ms = control_clock_ms();
+                apply_ctx.host_menu = host_settings_open();
+                apply_ctx.menu = lcs_menu_active();
+                apply_ctx.vehicle_fresh = lcs_player_in_vehicle();
+                apply_ctx.runtime_stopped = rt.stopped();
+                apply_ctx.window_closed = display_window_closed();
+                apply_ctx.vblank = display_vblank_index;
+                apply_ctx.stop_reason = rt.stop_reason();
+                host = control_surface_apply(physical, guest_control_memory(rt), apply_ctx).input;
+            }
             const std::uint32_t buttons = host.buttons;
             for (std::uint32_t index = 0u; index < count; ++index) {
                 const std::uint32_t sample = destination + index * sample_size;
@@ -3248,6 +3308,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
         if (display_window_closed()) {
             ge_worker_wait_idle();
             rt.stop("Display window closed");
+            note_control_vblank(rt);
             return;
         }
         audio_output_advance(virtual_time_us);
@@ -3255,6 +3316,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
             virtual_time_us += static_cast<std::uint64_t>(skipped) * kVblankPeriodUs;
             display_vblank_index += skipped;
         }
+        note_control_vblank(rt);
         const std::uint32_t vblank_delay = static_cast<std::uint32_t>(
             (virtual_time_us / kVblankPeriodUs + 1u) * kVblankPeriodUs - virtual_time_us);
         if (deliver_pending_ge_callback(ctx, vblank_delay, true)) return;

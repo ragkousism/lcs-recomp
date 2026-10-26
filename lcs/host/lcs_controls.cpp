@@ -1,4 +1,5 @@
 #include "lcs_controls.hpp"
+#include "lcs_control.hpp"
 #include "lcs_mouse.hpp"
 #include "lcs_frame_limit.hpp"
 
@@ -199,6 +200,22 @@ bool lcs_camera_in_use() noexcept {
 void lcs_camera_set_axes(int x, int y) noexcept {
     g_axis_x.store(std::clamp(x, -127, 127), std::memory_order_relaxed);
     g_axis_y.store(std::clamp(y, -127, 127), std::memory_order_relaxed);
+}
+
+void lcs_suppress_mouse_camera() noexcept {
+    g_last_mouse_camera_ms.store(0, std::memory_order_relaxed);
+    g_mouse_camera_dx.store(0, std::memory_order_relaxed);
+    g_mouse_camera_dy.store(0, std::memory_order_relaxed);
+}
+
+void lcs_control_use_host_publishers() noexcept {
+    ControlPublisher publisher;
+    publisher.camera = [](int x, int y, void *) { lcs_camera_set_axes(x, y); };
+    publisher.drive = [](bool accelerate, bool brake, void *) { lcs_set_host_drive_inputs(accelerate, brake); };
+    publisher.suppress_mouse = [](void *) { lcs_suppress_mouse_camera(); };
+    publisher.mouse_delta = [](int dx, int dy, void *) { lcs_add_mouse_camera_delta(dx, dy); };
+    control_set_publisher(publisher);
+    control_set_camera_stick_probe([]() { return lcs_camera_hook_enabled(); });
 }
 
 std::uint32_t lcs_accelerate_pad_offset() noexcept {

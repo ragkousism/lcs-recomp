@@ -9,6 +9,7 @@
 #include "lcs_display_menu.hpp"
 #include "lcs_key_bindings.hpp"
 #include "lcs_render_config.hpp"
+#include "lcs_control.hpp"
 #include "host_font_5x7.hpp"
 
 #include <SDL.h>
@@ -39,6 +40,10 @@ std::uint32_t g_texture_height{};
 std::vector<std::uint8_t> g_pending_frame{};
 std::uint32_t g_pending_width{};
 std::uint32_t g_pending_height{};
+std::uint64_t g_pending_vblank{};
+bool g_pending_vblank_valid{false};
+std::uint64_t g_blit_vblank{};
+bool g_blit_vblank_valid{false};
 std::atomic<int> g_wheel{0};
 std::atomic<std::int32_t> g_mouse_dx{0};
 std::atomic<std::int32_t> g_mouse_dy{0};
@@ -349,7 +354,14 @@ void blit_rgba(const void *pixels, std::uint32_t width, std::uint32_t height, in
     if (g_texture == nullptr) return;
     SDL_UpdateTexture(g_texture, nullptr, pixels, pitch);
     note_host_frame();
+    if (g_renderer == nullptr) return;
     present_game_texture(width, height);
+    if (g_blit_vblank_valid && control_surface_enabled()) {
+        const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                std::chrono::steady_clock::now().time_since_epoch())
+                                .count();
+        control_note_presented(g_blit_vblank, static_cast<std::int64_t>(now_ms));
+    }
 }
 
 bool present_swapchain_rgba(const std::uint8_t *pixels, std::uint32_t width,
@@ -360,9 +372,22 @@ bool present_swapchain_rgba(const std::uint8_t *pixels, std::uint32_t width,
     return ge_gpu_backend_present_guest_rgba(rgba, width, height);
 }
 
+void stamp_presented(bool valid, std::uint64_t vblank) {
+    if (!valid || !control_surface_enabled()) return;
+    const auto now_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                            std::chrono::steady_clock::now().time_since_epoch())
+                            .count();
+    control_note_presented(vblank, static_cast<std::int64_t>(now_ms));
+}
+
 void present_rgba_bytes(const std::uint8_t *pixels, std::uint32_t width, std::uint32_t height) {
     if (pixels == nullptr || width == 0u || height == 0u) return;
-    if (present_swapchain_rgba(pixels, width, height)) return;
+    std::uint64_t vblank = 0;
+    const bool have_vblank = control_bound_present_vblank(vblank);
+    if (present_swapchain_rgba(pixels, width, height)) {
+        stamp_presented(have_vblank, vblank);
+        return;
+    }
     const std::size_t bytes = static_cast<std::size_t>(width) * height * 4u;
     // Wayland only shows a window whose buffers are committed on the thread that created it.
     // GE completion runs on a worker thread, so hand the pixels to the window thread.
@@ -370,20 +395,31 @@ void present_rgba_bytes(const std::uint8_t *pixels, std::uint32_t width, std::ui
         g_pending_frame.assign(pixels, pixels + bytes);
         g_pending_width = width;
         g_pending_height = height;
+        g_pending_vblank = vblank;
+        g_pending_vblank_valid = have_vblank;
         return;
     }
+    g_blit_vblank = vblank;
+    g_blit_vblank_valid = have_vblank;
     blit_rgba(pixels, width, height, static_cast<int>(width * 4u));
+    g_blit_vblank_valid = false;
 }
 
 void present_pending_frame() {
     if (g_pending_frame.empty() || g_pending_width == 0u || g_pending_height == 0u) return;
     if (present_swapchain_rgba(g_pending_frame.data(), g_pending_width, g_pending_height)) {
+        stamp_presented(g_pending_vblank_valid, g_pending_vblank);
         g_pending_frame.clear();
+        g_pending_vblank_valid = false;
         return;
     }
+    g_blit_vblank = g_pending_vblank;
+    g_blit_vblank_valid = g_pending_vblank_valid;
     blit_rgba(g_pending_frame.data(), g_pending_width, g_pending_height,
               static_cast<int>(g_pending_width * 4u));
+    g_blit_vblank_valid = false;
     g_pending_frame.clear();
+    g_pending_vblank_valid = false;
 }
 
 void create_software_renderer() {
@@ -544,23 +580,34 @@ HostInputState display_window_input() {
     static std::chrono::steady_clock::time_point cached_at{};
     const auto poll_time = std::chrono::steady_clock::now();
     if (host_settings_open()) discard_pending_pointer();
+    const bool agent = control_surface_enabled();
     if (cached_at.time_since_epoch().count() != 0 &&
-        poll_time - cached_at < std::chrono::milliseconds(4))
+        poll_time - cached_at < std::chrono::milliseconds(4)) {
+        if (agent) control_note_sample(true, 0, 0);
         return cached;
+    }
     cached_at = poll_time;
     pump_events();
     if (host_settings_open()) {
         discard_pending_pointer();
         cached = {};
-        lcs_camera_set_axes(0, 0);
-        lcs_set_host_drive_inputs(false, false);
+        if (agent) control_note_sample(false, 0, 0);
+        else {
+            lcs_camera_set_axes(0, 0);
+            lcs_set_host_drive_inputs(false, false);
+        }
         return cached;
     }
 
     HostInputState input{};
+    int staged_mouse_dx = 0;
+    int staged_mouse_dy = 0;
     const auto publish = [&]() -> HostInputState {
-        lcs_camera_set_axes(input.camera_x, input.camera_y);
-        lcs_set_host_drive_inputs(input.accelerate, input.brake);
+        if (agent) control_note_sample(false, staged_mouse_dx, staged_mouse_dy);
+        else {
+            lcs_camera_set_axes(input.camera_x, input.camera_y);
+            lcs_set_host_drive_inputs(input.accelerate, input.brake);
+        }
         cached = input;
         return cached;
     };
@@ -612,7 +659,14 @@ HostInputState display_window_input() {
         };
         input.camera_x = camera_response(mouse_dx);
         input.camera_y = camera_response(-mouse_dy);
-        if (capture) lcs_add_mouse_camera_delta(mouse_dx, mouse_dy);
+        if (capture) {
+            if (agent) {
+                staged_mouse_dx = static_cast<int>(mouse_dx);
+                staged_mouse_dy = static_cast<int>(mouse_dy);
+            } else {
+                lcs_add_mouse_camera_delta(mouse_dx, mouse_dy);
+            }
+        }
         if (controls.invert_camera_y) input.camera_y = -input.camera_y;
     }
 

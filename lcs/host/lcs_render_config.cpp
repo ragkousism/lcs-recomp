@@ -342,6 +342,27 @@ bool parse_aspect_ratio(const std::string &value, std::uint32_t &x, std::uint32_
     return true;
 }
 
+void apply_control_key(LcsConfiguration &config, const std::string &key,
+                       const std::string &value, std::size_t line) {
+#if defined(_WIN32)
+    (void)key;
+    (void)value;
+    warning(config, line, "control surface is Linux-only");
+    return;
+#else
+    if (key == "enabled") {
+        if (!parse_bool(value, config.control.enabled))
+            warning(config, line, "Control.Enabled expects true/false");
+        return;
+    }
+    if (key == "socket") {
+        config.control.socket = value;
+        return;
+    }
+    warning(config, line, "unknown [Control] key '" + key + "'");
+#endif
+}
+
 void apply_controls_key(LcsConfiguration &config, const std::string &key,
                         const std::string &value, std::size_t line) {
     if (key == "camerastick" || key == "mousecamera") {
@@ -650,6 +671,8 @@ LcsConfiguration load_lcs_render_configuration(const std::filesystem::path &path
             apply_timing_key(config, key, value, line_number);
         else if (section == "widescreen")
             apply_widescreen_key(config, key, value, line_number);
+        else if (section == "control")
+            apply_control_key(config, key, value, line_number);
         else if (section == "controls")
             apply_controls_key(config, key, value, line_number);
         else if (section == "project2dfx" || section == "project 2dfx" ||
@@ -666,6 +689,13 @@ LcsConfiguration load_lcs_render_configuration(const std::filesystem::path &path
         else
             warning(config, line_number, "unknown section [" + section + "]");
     }
+#if !defined(_WIN32)
+    if (config.control.enabled && !config.control.socket.empty() &&
+        !std::filesystem::path(config.control.socket).is_absolute()) {
+        config.control.enabled = false;
+        warning(config, line_number, "Control.Socket must be an absolute path");
+    }
+#endif
     return config;
 }
 

@@ -136,6 +136,11 @@ struct WidescreenConfiguration {
 
 inline constexpr float kGameNativeAspectRatio = 16.0f / 9.0f;
 
+struct ControlConfiguration {
+    bool enabled{false};
+    std::string socket{};
+};
+
 struct ControlsConfiguration {
     bool camera_stick{true};
     std::uint32_t mouse_sensitivity{12u};
@@ -148,6 +153,7 @@ struct ControlsConfiguration {
 };
 
 struct LcsConfiguration {
+    ControlConfiguration control{};
     ControlsConfiguration controls{};
     DisplayConfiguration display{};
     RenderingConfiguration rendering{};
