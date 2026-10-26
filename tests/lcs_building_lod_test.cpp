@@ -1,5 +1,6 @@
 #include "lcs_render_config.hpp"
 
+#include <cstdint>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -72,22 +73,74 @@ bool guest_near_hide_uses_transform(const std::string &source) {
     return source.find("ctx.fpr[12] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(ctx.fpr[20]));") != std::string::npos;
 }
 
-std::string read_guest() {
+std::string read_text(const std::string &relative) {
     const std::string here = __FILE__;
     const auto slash = here.find_last_of("/\\");
     const std::string dir = slash == std::string::npos ? std::string{} : here.substr(0, slash);
-    const std::string path = dir + "/../lcs/generated/generated_unit_0170.cpp";
-    std::ifstream in(path);
+    std::ifstream in(dir + "/" + relative);
     if (!in) return {};
     return std::string(std::istreambuf_iterator<char>(in), std::istreambuf_iterator<char>());
 }
 
+// The 12 MiB reserve stays the game's immediate. Raising it shrinks the main heap.
+bool guest_reserve_unchanged(const std::string &source) {
+    const auto label = source.find("L_08AA4C0C:");
+    const auto next = source.find("L_08AA4C14:", label);
+    if (label == std::string::npos || next == std::string::npos) return false;
+    const std::string window = source.substr(label, next - label);
+    if (window.find("ctx.gpr[4] = (192u << 16u);") == std::string::npos) return false;
+    if (window.find("static_cast<std::uint32_t>(25900)") == std::string::npos) return false;
+    return window.find("lcs::") == std::string::npos;
+}
+
+// One size is stored, passed to CreateFpl, and passed to the heap initializer.
+bool streaming_size_is_shared(const std::string &source) {
+    const auto sized = source.find("L_08A0B8C8:");
+    const auto create = source.find("L_08A0B8F0:", sized);
+    const auto init = source.find("L_08A0B92C:", create);
+    if (sized == std::string::npos || create == std::string::npos || init == std::string::npos)
+        return false;
+    const std::string pad = source.substr(sized, create - sized);
+    if (pad.find("ctx.gpr[5] = (8u << 16u);") == std::string::npos) return false;
+    if (pad.find("ctx.gpr[5] = (ctx.gpr[2] - ctx.gpr[5]);") == std::string::npos) return false;
+    const std::string block = source.substr(create, init - create);
+    if (block.find("static_cast<std::uint32_t>(40), ctx.gpr[5])") == std::string::npos) return false;
+    if (block.find("ctx.gpr[7] = (ctx.gpr[5] | 0u);") == std::string::npos) return false;
+    const std::string heap = source.substr(init, 700);
+    return heap.find("static_cast<std::uint32_t>(40))") != std::string::npos &&
+           heap.find("0x08AA32FCu") != std::string::npos;
+}
+
+// 32 MiB still ends at 0x0A000000. The ceiling follows the constructed map.
+bool profile_stack_follows_map(const std::string &source) {
+    if (source.find("module_thread.stack_top = 0x0A000000u") != std::string::npos) return false;
+    return source.find("psprecomp::GuestMemory::kPhysicalBase + runtime.memory().size()") != std::string::npos;
+}
+
+// Same split the HLE uses: max free is the gap from the arena bump to the stack.
+std::uint32_t max_free_for_ram(std::uint32_t ram_bytes, std::uint32_t arena) {
+    constexpr std::uint32_t kPhysical = 0x08000000u;
+    constexpr std::uint32_t kModuleStack = 0x10000u;
+    const std::uint32_t high = (kPhysical + ram_bytes - kModuleStack) & ~0xFFu;
+    const std::uint32_t low = (arena + 0xFFu) & ~0xFFu;
+    return high > low ? high - low : 0u;
+}
+
 int building_lod() {
     using namespace lcs;
-    const std::string guest = read_guest();
+    const std::string guest = read_text("../lcs/generated/generated_unit_0170.cpp");
     if (guest.empty()) return fail("guest scan file");
     if (!guest_scan_uses_transform(guest)) return fail("guest scan still uses raw 300");
     if (!guest_near_hide_uses_transform(guest)) return fail("guest near hide");
+    const std::string heap = read_text("../lcs/generated/generated_unit_0168.cpp");
+    if (heap.empty() || !guest_reserve_unchanged(heap)) return fail("guest reserve store");
+    const std::string profile = read_text("../lcs/host/lcs_profile.cpp");
+    if (profile.empty() || !profile_stack_follows_map(profile)) return fail("stack ceiling");
+    const std::string streaming = read_text("../lcs/generated/generated_unit_0129.cpp");
+    if (streaming.empty() || !streaming_size_is_shared(streaming)) return fail("streaming size");
+    const std::string main_source = read_text("../lcs/host/main.cpp");
+    if (main_source.find("Runtime runtime(lcs::guest_ram_bytes())") == std::string::npos)
+        return fail("runtime ram size");
 
     const float scales[]{1.0f, 2.0f, 4.0f};
     for (const float scale : scales) {
@@ -136,8 +189,53 @@ int building_lod() {
     if (building_lod_detail_ready(1u, 1u, 128u)) return fail("fading detail hides");
     if (!building_lod_detail_ready(1u, 1u, 255u)) return fail("ready detail stays");
 
+    // StreamingHeap sizes itself from sceKernelMaxFreeMemSize. The 32 MiB map's
+    // free gap is under 22 MiB, so the 12 MiB reserve is not stored. A 64 MiB
+    // map moves that gap up by 32 MiB and the existing size path takes it.
+    constexpr std::uint32_t kRam32 = 32u * 1024u * 1024u;
+    constexpr std::uint32_t kRam64 = 64u * 1024u * 1024u;
+    constexpr std::uint32_t kReserveGate = 0x01600000u;
+    constexpr std::uint32_t kOriginalReserve = 0x00C00000u;
+    constexpr std::uint32_t kStreamPad = 0x00080000u;
+    constexpr std::uint32_t kArena = 0x08E65400u;
     lcs_set_view_distance(1.0f);
-    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400\n";
+    if (guest_ram_bytes() != kRam32) return fail("scale 1 ram");
+    lcs_set_view_distance(2.0f);
+    if (guest_ram_bytes() != kRam64) return fail("scale 2 ram");
+    lcs_set_view_distance(4.0f);
+    if (guest_ram_bytes() != kRam64) return fail("scale 4 ram");
+
+    const std::uint32_t free32 = max_free_for_ram(kRam32, kArena);
+    const std::uint32_t free64 = max_free_for_ram(kRam64, kArena);
+    if (free32 > kReserveGate) return fail("scale 1 would change reserve");
+    if (free64 <= kReserveGate) return fail("scale 4 misses reserve branch");
+    if (free64 - free32 != kRam64 - kRam32) return fail("free delta");
+    if (free32 < 0x00800000u || free64 < 0x00800000u) return fail("streaming pad branch");
+
+    // Streaming init runs on the free gap and keeps a 512 KiB pad. The main
+    // heap then gets that pad, same size on both maps.
+    const std::uint32_t stream32 = free32 - kStreamPad;
+    const std::uint32_t stream64 = free64 - kStreamPad;
+    if (stream64 != stream32 + (kRam64 - kRam32)) return fail("streaming block delta");
+    if (free32 - stream32 != free64 - stream64) return fail("main leftover changed");
+    const std::uint32_t low = (kArena + 0xFFu) & ~0xFFu;
+    const std::uint32_t stack64 = (0x08000000u + kRam64 - 0x10000u) & ~0xFFu;
+    if (low + stream64 > stack64) return fail("streaming past stack");
+    if (low + stream64 > 0x08000000u + kRam64) return fail("streaming past ram");
+    const std::uint32_t stack32 = (0x08000000u + kRam32 - 0x10000u) & ~0xFFu;
+    if (low + stream32 > stack32) return fail("scale 1 streaming past stack");
+
+    // If the main heap were first, 64 MiB crosses 22 MiB and the game's own
+    // 12 MiB reserve applies. That heap must not shrink below the 32 MiB size.
+    const std::uint32_t main32 = free32;
+    const std::uint32_t main64 = free64 - kOriginalReserve;
+    if (main64 < main32) return fail("main heap shrank");
+    if (kOriginalReserve < 0x00800000u) return fail("reserve pad");
+    const std::uint32_t stream_after_main = kOriginalReserve - kStreamPad;
+    if (low + main64 + stream_after_main > stack64) return fail("reserve path past stack");
+
+    lcs_set_view_distance(1.0f);
+    std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400 stream +32 MiB\n";
     return 0;
 }
 
