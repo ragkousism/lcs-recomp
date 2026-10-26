@@ -1957,6 +1957,34 @@ L_08AAC86C:
     ctx.gpr[4] = (2230u << 16u);
     goto L_08AAC870;
 L_08AAC870:
+    // LOD list draws with no distance test. Hide inside lod[2] * TheCamera+224.
+    {
+        const std::uint32_t model_flags = aot_mem.aot_load16(ctx.gpr[17] + static_cast<std::uint32_t>(54));
+        if ((model_flags & 16u) != 0u) {
+            const float near_unscaled = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(48)));
+            ctx.gpr[5] = (2232u << 16u);
+            ctx.gpr[5] = (ctx.gpr[5] + static_cast<std::uint32_t>(12960));
+            const float camera_multiplier = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[5] + static_cast<std::uint32_t>(224)));
+            const float dx = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(48))) - std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[5] + static_cast<std::uint32_t>(48)));
+            const float dy = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(52))) - std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[5] + static_cast<std::uint32_t>(52)));
+            const float dz = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[16] + static_cast<std::uint32_t>(56))) - std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[5] + static_cast<std::uint32_t>(56)));
+            const float dist = std::sqrt(dx * dx + dy * dy + dz * dz);
+            if (lcs::building_lod_hidden(dist, near_unscaled, camera_multiplier)) {
+                const std::uint32_t related = aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(56));
+                std::uint32_t atomic0 = 0u;
+                std::uint32_t alpha = 0u;
+                if (related != 0u) {
+                    const std::uint32_t atomics = aot_mem.aot_load32(related + static_cast<std::uint32_t>(36));
+                    atomic0 = atomics == 0u ? 0u : aot_mem.aot_load32(atomics);
+                    alpha = aot_mem.aot_load8(related + static_cast<std::uint32_t>(53));
+                }
+                if (lcs::building_lod_detail_ready(related, atomic0, alpha)) {
+                    ctx.gpr[2] = (0u | 0u);
+                    goto L_08AAD358;
+                }
+            }
+        }
+    }
     ctx.gpr[4] = (aot_mem.aot_load32(ctx.gpr[4] + static_cast<std::uint32_t>(-20436)));
     ctx.gpr[5] = (ctx.gpr[18] | 0u);
     ctx.gpr[31] = (0x08AAC880u);
@@ -3066,14 +3094,14 @@ L_08AACF60:
             const float camera_multiplier = std::bit_cast<float>(aot_mem.aot_load32(ctx.gpr[4] + static_cast<std::uint32_t>(224)));
             if (lcs::building_lod_hidden(ctx.fpr[20], near_unscaled, camera_multiplier)) {
                 const std::uint32_t related = aot_mem.aot_load32(ctx.gpr[17] + static_cast<std::uint32_t>(56));
-                bool hide = related == 0u;
+                std::uint32_t atomic0 = 0u;
+                std::uint32_t alpha = 0u;
                 if (related != 0u) {
                     const std::uint32_t atomics = aot_mem.aot_load32(related + static_cast<std::uint32_t>(36));
-                    const std::uint32_t atomic0 = atomics == 0u ? 0u : aot_mem.aot_load32(atomics);
-                    const std::uint32_t alpha = aot_mem.aot_load8(related + static_cast<std::uint32_t>(53));
-                    hide = atomic0 != 0u && alpha == 255u;
+                    atomic0 = atomics == 0u ? 0u : aot_mem.aot_load32(atomics);
+                    alpha = aot_mem.aot_load8(related + static_cast<std::uint32_t>(53));
                 }
-                if (hide) {
+                if (lcs::building_lod_detail_ready(related, atomic0, alpha)) {
                     ctx.gpr[2] = (0u | 0u);
                     goto L_08AAD358;
                 }

@@ -99,6 +99,9 @@ struct DisplaySurfaceDimensions {
 // camera_multiplier is TheCamera+224 and already includes ViewDistance.
 [[nodiscard]] bool building_lod_hidden(float dist, float near_unscaled, float camera_multiplier) noexcept;
 
+// High-detail stand-in is absent, or its first atomic is loaded and fully faded in.
+[[nodiscard]] bool building_lod_detail_ready(std::uint32_t related, std::uint32_t atomic0, std::uint32_t alpha) noexcept;
+
 void lcs_set_view_distance(float value) noexcept;
 void lcs_set_increased_spawn(bool enabled) noexcept;
 void lcs_set_fullscreen_setting(bool enabled) noexcept;
