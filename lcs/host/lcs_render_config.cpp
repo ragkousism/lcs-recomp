@@ -527,6 +527,10 @@ bool building_lod_hidden(float dist, float near_unscaled, float camera_multiplie
     return dist < near_dist && dist < limit;
 }
 
+bool building_lod_detail_ready(std::uint32_t related, std::uint32_t atomic0, std::uint32_t alpha) noexcept {
+    return related == 0u || (atomic0 != 0u && alpha == 255u);
+}
+
 void lcs_set_view_distance(float value) noexcept {
     if (!std::isfinite(value)) return;
     value = std::clamp(value, 1.0f, 4.0f);

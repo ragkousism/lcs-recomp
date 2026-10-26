@@ -60,9 +60,15 @@ bool guest_near_hide_uses_transform(const std::string &source) {
     if (window.find("& 16u") == std::string::npos) return false;
     if (window.find("static_cast<std::uint32_t>(228)") != std::string::npos) return false;
     if (window.find("aot_store32") != std::string::npos) return false;
-    if (source.find("lcs::building_lod_hidden(") != call + label) return false;
-    const auto again = source.find("lcs::building_lod_hidden(", call + label + 1);
-    if (again != std::string::npos) return false;
+    if (window.find("lcs::building_lod_detail_ready(") == std::string::npos) return false;
+    const auto first = source.find("lcs::building_lod_hidden(");
+    const auto second = source.find("lcs::building_lod_hidden(", first + 1);
+    const auto third = second == std::string::npos ? second : source.find("lcs::building_lod_hidden(", second + 1);
+    if (first == std::string::npos || second == std::string::npos || third != std::string::npos) return false;
+    if (second != call + label) return false;
+    const auto list = source.find("L_08AAC870:");
+    const auto listed = source.find("0x089508BCu", list);
+    if (list == std::string::npos || listed == std::string::npos || first < list || first > listed) return false;
     return source.find("ctx.fpr[12] = std::bit_cast<float>(std::bit_cast<std::uint32_t>(ctx.fpr[20]));") != std::string::npos;
 }
 
@@ -125,6 +131,10 @@ int building_lod() {
     if (building_lod_hidden(300.0f, 400.0f, 1.0f)) return fail("cap keeps 300");
     if (!building_lod_hidden(1199.0f, 400.0f, 4.0f)) return fail("cap hides 1199");
     if (building_lod_hidden(1200.0f, 400.0f, 4.0f)) return fail("cap keeps 1200");
+    if (!building_lod_detail_ready(0u, 0u, 0u)) return fail("missing detail stays");
+    if (building_lod_detail_ready(1u, 0u, 255u)) return fail("unloaded detail hides");
+    if (building_lod_detail_ready(1u, 1u, 128u)) return fail("fading detail hides");
+    if (!building_lod_detail_ready(1u, 1u, 255u)) return fail("ready detail stays");
 
     lcs_set_view_distance(1.0f);
     std::cout << "building_lod pass scan 300/600/1200 at 1,2,4 near-hide 100/400\n";
