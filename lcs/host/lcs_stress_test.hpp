@@ -5,6 +5,7 @@
 #include <array>
 #include <cstdint>
 #include <filesystem>
+#include <string_view>
 
 namespace lcs {
 
@@ -14,7 +15,49 @@ struct StressObservation {
     std::uint32_t entity{};
     std::array<float, 3> position{};
     bool menu{};
+    // CMatrix forward, the second inline row. Position stays at +48.
+    std::array<float, 2> facing{};
+    // Active camera front. On foot the stick moves in this frame.
+    std::array<float, 2> camera{};
+    // Nearest occupied vehicle within the search radius. Empty when none.
+    bool vehicle_near{};
+    std::array<float, 3> vehicle{};
 };
+
+struct VehicleSample {
+    float x{};
+    float y{};
+    float z{};
+};
+
+// command.txt: hold, shot, goto X Y, stick AX AY BUTTONS, forward, run, back, left, right, enter.
+struct DirectOrder {
+    bool hold{true};
+    bool shot{};
+    bool has_target{};
+    bool manual{};
+    float target_x{};
+    float target_y{};
+    std::uint8_t analog_x{128u};
+    std::uint8_t analog_y{128u};
+    std::uint32_t buttons{};
+};
+
+struct DirectMove {
+    HostInputState input{};
+    bool arrived{};
+};
+
+[[nodiscard]] DirectOrder parse_direct_order(std::string_view line);
+[[nodiscard]] DirectMove apply_direct_order(const DirectOrder &order, const StressObservation &observation);
+// Index of the closest finite sample inside max_distance, or -1.
+[[nodiscard]] int nearest_vehicle(float x, float y, float z, const VehicleSample *samples, int count,
+                                  float max_distance);
+// rows are right, forward, up. Forward is the second row, not the longest one.
+[[nodiscard]] std::array<float, 2> matrix_forward(const float (&rows)[3][2]);
+// Closes the PPM before copying so the copy is not a partial buffer.
+[[nodiscard]] bool write_ppm(const std::filesystem::path &path, const std::filesystem::path &copy_to,
+                              const unsigned char *rgb, std::size_t rgb_bytes, unsigned width, unsigned height);
 
 // Time comes from the caller so scripts and obstacle recovery can be replayed in tests.
 class StressController {
@@ -50,6 +93,7 @@ private:
 
 // Explicit opt-in; enabling this also disables ALL guest filesystem writes.
 void stress_test_init(bool enabled, bool driving, const std::filesystem::path &output);
+void stress_test_set_direct(const std::filesystem::path &directory);
 bool stress_test_enabled();
 bool stress_savedata_mutates(std::uint32_t mode);
 void stress_test_note_blocked_write();

@@ -173,6 +173,15 @@ LCSNative --game <game-root> --stress-test --max-seconds 600 --stress-output <ne
 LCSNative --game <game-root> --stress-driving --max-seconds 1800 --stress-output <new-output-directory>
 ```
 
+`--direct <directory>` writes `state.json` (position, facing, camera, arrived) about
+five times a second and reads `command.txt`. One line is `hold`, `shot`,
+`goto X Y`, `stick AX AY BUTTONS`, `forward`, `run`, `back`, `left`, `right`,
+or `enter`. On foot, `goto` steers from the camera. In a vehicle it steers from the vehicle heading. `shot` may precede another command. A new `shot` line saves
+`shot-N.ppm` and `latest.ppm` from a CPU frame. A direct Vulkan or DX12
+swapchain has no CPU pixels, so that request writes `shot-unavailable.txt`
+instead. Standing still for a photograph does not trip the 60 second stall
+failure. The startup menu pulses still run until gameplay is ready.
+
 Native test mode blocks saving, but only the Python runner copies saves and
 configuration. Native runs default to 600 seconds if no duration is supplied.
 Exit code 0 means the run completed and movement was verified; 2 means incomplete

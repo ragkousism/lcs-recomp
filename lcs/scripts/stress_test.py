@@ -29,6 +29,8 @@ def main():
     parser.add_argument('--binary', type=Path, default=repo / 'out/lcs-linux/lcs/LCSNative')
     parser.add_argument('--config', type=Path, default=repo / 'lcs/config/LCSNative.ini')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--direct', type=Path,
+                        help='directory for command.txt, state.json, and requested shots')
     args = parser.parse_args()
     if args.seconds <= 0:
         parser.error('--seconds must be positive')
@@ -58,6 +60,10 @@ def main():
         command = [str(binary), '--game', str(isolated),
                    '--stress-driving' if args.driving else '--stress-test',
                    '--max-seconds', str(args.seconds), '--stress-output', str(output)]
+        if args.direct:
+            direct = args.direct.resolve()
+            direct.mkdir(parents=True, exist_ok=True)
+            command.extend(['--stress-direct', str(direct)])
         print(f'Unattended test: {args.seconds}s; driving={args.driving}; output={output}', flush=True)
         with (output / 'runtime.log').open('w') as log:
             process = subprocess.Popen(command, env=env, stdout=log, stderr=subprocess.STDOUT)

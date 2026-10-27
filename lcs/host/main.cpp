@@ -31,6 +31,7 @@ int main(int argc, char **argv) {
     bool max_seconds_supplied = false;
     bool stress = false, stress_driving = false;
     std::filesystem::path stress_output = "out/stress-results";
+    std::filesystem::path stress_direct;
     for (int i = 1; i < argc; ++i) {
         const std::string_view arg = argv[i];
         if (arg == "--stress-test") {
@@ -39,6 +40,9 @@ int main(int argc, char **argv) {
             stress = stress_driving = true;
         } else if (arg == "--stress-output" && i + 1 < argc) {
             stress_output = argv[++i];
+        } else if (arg == "--stress-direct" && i + 1 < argc) {
+            stress = true;
+            stress_direct = argv[++i];
         } else if (arg == "--game" && i + 1 < argc) {
             game_root = argv[++i];
             elf_path = game_root / "EBOOT.ELF";
@@ -106,6 +110,7 @@ int main(int argc, char **argv) {
         lcs::display_window_attach_gpu_backend();
         lcs::set_wall_clock_limit(max_seconds);
         lcs::stress_test_init(stress, stress_driving, stress_output);
+        if (!stress_direct.empty()) lcs::stress_test_set_direct(stress_direct);
 
         if (const auto module = elf.find_module_info(runtime.memory(), psprecomp::kDefaultPspUserLoadBase)) {
             runtime.cpu().set_gpr(28, module->gp);
