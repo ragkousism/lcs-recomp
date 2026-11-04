@@ -13,8 +13,15 @@ progress/     Development history; ignored by Git
 ```
 
 Linux builds with `scripts/build_linux.sh` and runs with
-`scripts/play_linux.sh`. The GPU path is
-Vulkan. `config/LCSNative.ini` keeps `Backend=DirectX12` because that
+`scripts/play_linux.sh`. The default GPU path is
+Vulkan. `scripts/build_linux.sh opengl` writes
+`out/lcs-linux-opengl`, and `scripts/play_linux.sh opengl` runs it.
+`BUILD_LCS.bat opengl` writes `out/lcs-clang-opengl`, and
+`PLAY_LCS.bat opengl` runs it. From the repo root,
+`./docker/play_windows_on_linux.sh opengl` runs the Windows OpenGL exe
+under Wine: `wine out/lcs-windows-opengl/lcs/LCSNative.exe` when that
+build exists, otherwise `wine out/lcs-windows/lcs/LCSNative.exe`.
+`config/LCSNative.ini` keeps `Backend=DirectX12` because that
 file is also the Windows configuration; on Linux the same value
 selects Vulkan. `Backend=Vulkan` selects it by
 name. `glslangValidator` compiles `host/vulkan/ge.vert` and

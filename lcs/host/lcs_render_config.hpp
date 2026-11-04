@@ -37,6 +37,7 @@ enum class RenderingBackend : std::uint8_t {
     Software,
     DirectX12,
     Vulkan,
+    OpenGL,
 };
 
 struct DisplayConfiguration {

@@ -14,15 +14,20 @@ Requires Visual Studio 2022 and LLVM (clang-cl).
 
 ```text
 lcs\BUILD_LCS.bat
+lcs\BUILD_LCS.bat opengl
 ```
 
 ## Play
 
 ```text
 lcs\PLAY_LCS.bat
+lcs\PLAY_LCS.bat opengl
 ```
 
-Settings are in `lcs/config/LCSNative.ini`.
+Settings are in `lcs/config/LCSNative.ini`. `opengl` writes the OpenGL
+3.3 GE to `out\lcs-clang-opengl`. The play script sets `LCS_GE_BACKEND`
+and leaves `Backend=DirectX12` in the ini. The default scripts stay on
+DirectX 12 in `out\lcs-clang`.
 
 `Display.ResolutionMode` is the window (`PSP`, `Scale`, `Custom`, or
 `Desktop`). `Rendering.InternalResolutionMode` is the GE render
@@ -105,8 +110,16 @@ with `glslangValidator`. Editing either shader rebuilds it into
 
 `lcs/config/LCSNative.ini` is shared with Windows, so the checked-in
 setting stays `Backend=DirectX12`. On Linux that value selects the
-Vulkan GE. `Backend=Vulkan` selects it explicitly, and any other
-backend name keeps the software rasterizer. `LCS_VULKAN_VALIDATION=1`
+Vulkan GE. `Backend=Vulkan` selects it explicitly. OpenGL is a separate
+build. On Linux, `lcs/scripts/build_linux.sh opengl` then
+`lcs/scripts/play_linux.sh opengl`. On Windows,
+`lcs\BUILD_LCS.bat opengl` then `lcs\PLAY_LCS.bat opengl`. Under Wine,
+`./docker/play_windows_on_linux.sh opengl` runs
+`out/lcs-windows-opengl/lcs/LCSNative.exe` when
+`docker/build_windows_on_linux.sh opengl` has produced it, otherwise
+`out/lcs-windows/lcs/LCSNative.exe`. Each play script sets
+`LCS_GE_BACKEND=opengl` and leaves the ini unchanged. Any other backend
+name keeps the software rasterizer. `LCS_VULKAN_VALIDATION=1`
 turns on the Khronos validation layer and prints its warnings and
 errors.
 

@@ -1842,7 +1842,8 @@ bool software_raster_skipped(const std::array<std::uint32_t, 256> &commands) noe
         if (value != nullptr && *value != '\0') return *value != '0';
         const LcsConfiguration &cfg = lcs_render_configuration();
         const bool gpu_backend = cfg.rendering.backend == RenderingBackend::DirectX12 ||
-                                 cfg.rendering.backend == RenderingBackend::Vulkan;
+                                 cfg.rendering.backend == RenderingBackend::Vulkan ||
+                                 cfg.rendering.backend == RenderingBackend::OpenGL;
         return cfg.initialized && gpu_backend && cfg.rendering.dx12_ge_color;
     }();
     static const bool skip_owned = [] {
