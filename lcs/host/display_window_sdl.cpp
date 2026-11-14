@@ -418,14 +418,18 @@ void display_window_init() {
     const bool nearest = lcs_render_configuration().display.upscale_filter == DisplayUpscaleFilter::Nearest;
     SDL_SetHint(SDL_HINT_RENDER_SCALE_QUALITY, nearest ? "0" : "1");
     const DisplaySurfaceDimensions surface = resolve_window_dimensions();
-    // Takes the Wayland surface, so create it only when the swapchain cannot.
+    // A Vulkan flag claims the Wayland surface. OpenGL and the software GE stay on a plain window.
     // SDL_WINDOW_VULKAN fails when the video driver has no Vulkan support.
+    // On Linux, Backend=DirectX12 selects the Vulkan GE.
+    const RenderingBackend backend = lcs_render_configuration().rendering.backend;
+    const bool vulkan_window = backend == RenderingBackend::Vulkan ||
+                               backend == RenderingBackend::DirectX12;
     const Uint32 window_flags = SDL_WINDOW_RESIZABLE | SDL_WINDOW_SHOWN;
     g_window = SDL_CreateWindow("LCSNative - GTA: Liberty City Stories",
                                 SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
                                 static_cast<int>(surface.width), static_cast<int>(surface.height),
-                                window_flags | SDL_WINDOW_VULKAN);
-    if (g_window == nullptr) {
+                                vulkan_window ? window_flags | SDL_WINDOW_VULKAN : window_flags);
+    if (g_window == nullptr && vulkan_window) {
         std::cerr << "[window] Vulkan window unavailable: " << SDL_GetError() << "\n";
         g_window = SDL_CreateWindow("LCSNative - GTA: Liberty City Stories",
                                     SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
@@ -460,6 +464,9 @@ void display_window_attach_gpu_backend() {
         return;
     }
     create_software_renderer();
+    if (ge_gpu_backend_active() &&
+        lcs_render_configuration().rendering.backend == RenderingBackend::OpenGL)
+        std::cerr << "[window] presenter=opengl\n";
 }
 
 bool display_window_profile_key_pressed() {

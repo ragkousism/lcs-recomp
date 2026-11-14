@@ -16,13 +16,20 @@ Requires Visual Studio 2022 and LLVM (clang-cl).
 lcs\BUILD_LCS.bat
 ```
 
+That build contains DirectX 12 and OpenGL. `Rendering.Backend` in
+`lcs/config/LCSNative.ini` chooses. `DirectX12` and `OpenGL` are the
+Windows values.
+
 ## Play
 
 ```text
 lcs\PLAY_LCS.bat
+lcs\PLAY_LCS.bat opengl
 ```
 
-Settings are in `lcs/config/LCSNative.ini`.
+`lcs\PLAY_LCS.bat` follows the ini. `opengl` sets `LCS_GE_BACKEND` for
+that run and leaves the ini unchanged. Both use
+`out\lcs-clang\lcs\LCSNative.exe`.
 
 `Display.ResolutionMode` is the window (`PSP`, `Scale`, `Custom`, or
 `Desktop`). `Rendering.InternalResolutionMode` is the GE render
@@ -88,9 +95,9 @@ buttons in a vehicle; accelerate and brake still apply.
 
 ## Linux
 
-The native build uses Vulkan for the GE and SDL2 for the window and
-audio. It needs `glslangValidator`, plus the Vulkan, SDL2, and FFmpeg
-development packages. The Linux build also compiles a small tool that
+The native build contains the Vulkan and OpenGL GEs, and uses SDL2 for
+the window and audio. It needs `glslangValidator`, plus the Vulkan,
+OpenGL, SDL2, and FFmpeg development packages. The Linux build also compiles a small tool that
 packs `lcs/host/font5x7.txt` into the F10 menu font. The Windows build
 does not run that step.
 
@@ -103,12 +110,18 @@ That build compiles `lcs/host/vulkan/ge.vert` and `ge.frag` to SPIR-V
 with `glslangValidator`. Editing either shader rebuilds it into
 `LCSNative`.
 
-`lcs/config/LCSNative.ini` is shared with Windows, so the checked-in
-setting stays `Backend=DirectX12`. On Linux that value selects the
-Vulkan GE. `Backend=Vulkan` selects it explicitly, and any other
-backend name keeps the software rasterizer. `LCS_VULKAN_VALIDATION=1`
-turns on the Khronos validation layer and prints its warnings and
-errors.
+`lcs/config/LCSNative.ini` is shared with Windows. `Backend=DirectX12`
+selects the Vulkan GE on Linux and DirectX 12 on Windows.
+`Backend=Vulkan` selects Vulkan by name. `Backend=OpenGL` selects the
+OpenGL 3.3 GE. Linux builds both Vulkan and OpenGL into
+`out/lcs-linux`. Windows builds both DirectX 12 and OpenGL into
+`out\lcs-clang`. Under Wine, `./docker/build_windows_on_linux.sh` writes
+`out/lcs-windows/lcs/LCSNative.exe`, and
+`./docker/play_windows_on_linux.sh` runs it. A play-script argument
+(`opengl`, `vulkan`, or `dx12`) sets `LCS_GE_BACKEND` for that run and
+leaves the ini unchanged. Any other backend name keeps the software
+rasterizer. `LCS_VULKAN_VALIDATION=1` turns on the Khronos validation
+layer and prints its warnings and errors.
 
 ## Docker
 You also can utilize [Docker](https://www.docker.com/) to build the Linux version.

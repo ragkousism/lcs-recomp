@@ -2,6 +2,7 @@
 #include "ge_gpu_backend.hpp"
 #include "lcs_fps_overlay.hpp"
 #include "lcs_menu.hpp"
+#include "lcs_prompt_textures.hpp"
 #include "lcs_render_config.hpp"
 
 #include "psprecomp/common.hpp"
@@ -1841,7 +1842,8 @@ bool software_raster_skipped(const std::array<std::uint32_t, 256> &commands) noe
         if (value != nullptr && *value != '\0') return *value != '0';
         const LcsConfiguration &cfg = lcs_render_configuration();
         const bool gpu_backend = cfg.rendering.backend == RenderingBackend::DirectX12 ||
-                                 cfg.rendering.backend == RenderingBackend::Vulkan;
+                                 cfg.rendering.backend == RenderingBackend::Vulkan ||
+                                 cfg.rendering.backend == RenderingBackend::OpenGL;
         return cfg.initialized && gpu_backend && cfg.rendering.dx12_ge_color;
     }();
     static const bool skip_owned = [] {
@@ -4339,6 +4341,8 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             total_bytes += static_cast<std::size_t>(bytes);
         }
         std::vector<std::byte> decoded;
+        const std::size_t mip0_bytes = static_cast<std::size_t>(mip_setups[0].width) *
+                                       mip_setups[0].height * 4u;
         if (all) {
             try { decoded.resize(total_bytes); } catch (...) { all = false; }
         }
@@ -4354,6 +4358,14 @@ bool render_ge_primitive(psprecomp::GuestMemory &memory,
             offset += bytes;
         }
         if (all) {
+            lcs::prompt_texture_dump(gpu_draw.texture_content_signature, mip_setups[0].width,
+                                     mip_setups[0].height, gpu_draw.texture_address,
+                                     gpu_draw.texture_format, layout.through,
+                                     std::span<const std::byte>(decoded).first(mip0_bytes));
+            lcs::prompt_texture_apply(gpu_draw.texture_content_signature, mip_setups[0].width,
+                                      mip_setups[0].height,
+                                      static_cast<std::uint32_t>(level_count),
+                                      std::span<std::byte>(decoded));
             (void)ge_gpu_backend_upload_decoded_texture_chain_packed(
                 gpu_draw, mip_setups[0].width, mip_setups[0].height,
                 level_count, std::move(decoded));

@@ -13,6 +13,7 @@
 #include "lcs_lang.hpp"
 #include "lcs_menu.hpp"
 #include "lcs_stress_test.hpp"
+#include "lcs_world_detail.hpp"
 
 #include "psprecomp/common.hpp"
 
@@ -207,6 +208,40 @@ std::string disc_directory_name(const std::filesystem::path &path) {
         if (ch >= 'a' && ch <= 'z') ch = static_cast<char>(ch - 'a' + 'A');
     }
     return name;
+}
+
+// LOGO.PMF and TITLES.PMF are the boot intro. Other PMFs are cutscenes.
+bool boot_intro_movie(const std::filesystem::path &path) {
+    const std::string name = disc_directory_name(path);
+    return name == "LOGO.PMF" || name == "TITLES.PMF";
+}
+
+// Skip a same-named child of this folder. Wine hides the link and keeps a trailing separator.
+bool directory_symlink_reenters(const std::filesystem::path &listed,
+                                const std::filesystem::directory_entry &entry) {
+    std::error_code error;
+    const std::string name = entry.path().filename().generic_string();
+    const std::string entry_text = entry.path().generic_string();
+    if (!name.empty() && entry_text.ends_with("/" + name + "/" + name)) {
+        const bool directory = entry.is_directory(error);
+        if (!error && directory) return true;
+        error.clear();
+    }
+    std::filesystem::path listed_leaf = listed;
+    if (listed_leaf.filename().empty()) listed_leaf = listed_leaf.parent_path();
+    if (!name.empty() && listed_leaf.filename().generic_string() == name) {
+        const bool same_file = std::filesystem::equivalent(entry.path(), listed, error);
+        if (!error && same_file) return true;
+        error.clear();
+    }
+    if (!entry.is_symlink(error) || error) return false;
+    const std::filesystem::path target = std::filesystem::weakly_canonical(entry.path(), error);
+    if (error) return false;
+    const std::filesystem::path canonical_listed = std::filesystem::weakly_canonical(listed, error);
+    if (error) return false;
+    const std::string target_text = target.generic_string();
+    const std::string listed_text = canonical_listed.generic_string();
+    return target_text == listed_text || listed_text.starts_with(target_text + "/");
 }
 
 struct RawSectorFile {
@@ -516,7 +551,17 @@ bool read_video_frame(MpegContextState &state, std::span<std::uint8_t> frame) {
     return true;
 }
 
+// The play loop leaves once this ring is empty and the file has been read.
+void drain_boot_intro_ring(psprecomp::Runtime &runtime, const MpegContextState &state) {
+    if (!boot_intro_movie(state.source_path)) return;
+    const std::uint32_t ring = state.ring_address;
+    if (ring == 0u || !runtime.memory().contains(ring, 16u)) return;
+    runtime.memory().store32(ring + 8u, 0u);
+    runtime.memory().store32(ring + 12u, 0u);
+}
+
 std::uint32_t mpeg_au_limit(const MpegContextState &state) {
+    if (boot_intro_movie(state.source_path)) return 0u;
     if (state.analyzed && state.header.last_timestamp > state.header.first_timestamp) {
         return static_cast<std::uint32_t>(
             (state.header.last_timestamp - state.header.first_timestamp) / 3003u) + 1u;
@@ -1888,6 +1933,7 @@ void ge_worker_shutdown() {
 }
 
 void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start) {
+    reset_world_detail();
     thread_table = ThreadTable{};
     lcs_menu_init(runtime);
 
@@ -3114,7 +3160,10 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                     return;
                 }
                 DirectoryHandle handle;
-                for (const auto &entry : std::filesystem::directory_iterator(native)) handle.entries.push_back(entry);
+                for (const auto &entry : std::filesystem::directory_iterator(native)) {
+                    if (directory_symlink_reenters(native, entry)) continue;
+                    handle.entries.push_back(entry);
+                }
                 std::sort(handle.entries.begin(), handle.entries.end(), [](const auto &a, const auto &b) {
                     return disc_directory_name(a.path()) < disc_directory_name(b.path());
                 });
@@ -4228,6 +4277,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 return;
             }
             if (state->second.video_au_count >= mpeg_au_limit(state->second)) {
+                drain_boot_intro_ring(rt, state->second);
                 write_mpeg_timestamp(rt.memory(), au, 0u);
                 write_mpeg_timestamp(rt.memory(), au + 8u, 0u);
                 ctx.set_gpr(2, 0x80618001u);
@@ -4254,6 +4304,7 @@ void install_profile(psprecomp::Runtime &runtime, std::uint32_t user_arena_start
                 return;
             }
             if (state->second.audio_au_count >= mpeg_au_limit(state->second)) {
+                drain_boot_intro_ring(rt, state->second);
                 write_mpeg_timestamp(rt.memory(), au, 0u);
                 write_mpeg_timestamp(rt.memory(), au + 8u, 0u);
                 ctx.set_gpr(2, 0x80618001u);

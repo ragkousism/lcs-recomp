@@ -5,6 +5,7 @@ ARG PGID=1000
 
 RUN pacman --sync --refresh --sysupgrade --noconfirm && \
 	pacman --sync --refresh --noconfirm vulkan-devel \
+					libglvnd \
 					pipewire-jack \
 					ffmpeg \
 					cmake \

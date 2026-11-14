@@ -3,13 +3,23 @@ setlocal EnableExtensions
 for %%I in ("%~dp0..\..") do set "REPO=%%~fI"
 for %%I in ("%~dp0..") do set "LCS_DIR=%%~fI"
 
+set "BACKEND="
+if /I "%~1"=="opengl" set "BACKEND=opengl"
+if /I "%~1"=="gl" set "BACKEND=opengl"
+if /I "%~1"=="gl3" set "BACKEND=opengl"
+if /I "%~1"=="gl33" set "BACKEND=opengl"
+if /I "%~1"=="dx12" set "BACKEND=dx12"
+if /I "%~1"=="directx12" set "BACKEND=dx12"
+if /I "%~1"=="d3d12" set "BACKEND=dx12"
+if defined BACKEND shift
+if /I "%BACKEND%"=="opengl" set "LCS_GE_BACKEND=opengl"
+if /I "%BACKEND%"=="dx12" set "LCS_GE_BACKEND=directx12"
+
 set "BIN=%REPO%\out\lcs\lcs\Release\LCSNative.exe"
 if defined LCS_BIN set "BIN=%LCS_BIN%"
 if not exist "%BIN%" (
   echo LCSNative.exe not found at "%BIN%".
-  echo Build it first:
-  echo   cmake -S . -B out/lcs
-  echo   cmake --build out/lcs --config Release
+  echo Build it first: lcs\BUILD_LCS.bat
   pause
   exit /b 3
 )

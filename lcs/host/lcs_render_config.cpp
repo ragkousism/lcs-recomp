@@ -193,6 +193,17 @@ void apply_display_key(LcsConfiguration &config, const std::string &key,
             warning(config, line, "Display.HudScale must be between 0.25 and 1.0");
         return;
     }
+    if (key == "buttonprompts" || key == "promptstyle") {
+        const std::string style = lowercase_copy(trim_copy(value));
+        const std::string forbidden = "/\\<>:\"|?* ";
+        if (style.size() > 32 || style.find_first_of(forbidden) != std::string::npos ||
+            style.find("..") != std::string::npos)
+            warning(config, line,
+                    "Display.ButtonPrompts expects Original or a folder name");
+        else
+            config.display.prompt_style = style;
+        return;
+    }
     warning(config, line, "unknown [Display] key '" + key + "'");
 }
 
@@ -204,8 +215,10 @@ void apply_rendering_key(LcsConfiguration &config, const std::string &key,
             config.rendering.backend = RenderingBackend::DirectX12;
         else if (backend == "vulkan" || backend == "vk")
             config.rendering.backend = RenderingBackend::Vulkan;
+        else if (backend == "opengl" || backend == "gl" || backend == "gl3" || backend == "gl33")
+            config.rendering.backend = RenderingBackend::OpenGL;
         else
-            warning(config, line, "Rendering.Backend supports DirectX12 and Vulkan");
+            warning(config, line, "Rendering.Backend supports DirectX12, Vulkan and OpenGL");
         return;
     }
     if (key == "internalresolutionmode" || key == "internalmode") {
@@ -669,6 +682,20 @@ LcsConfiguration load_lcs_render_configuration(const std::filesystem::path &path
     return config;
 }
 
+static void apply_backend_environment(LcsConfiguration &config) {
+    const char *value = std::getenv("LCS_GE_BACKEND");
+    if (value == nullptr || *value == '\0') return;
+    const std::string backend = lowercase_copy(trim_copy(value));
+    if (backend == "opengl" || backend == "gl" || backend == "gl3" || backend == "gl33")
+        config.rendering.backend = RenderingBackend::OpenGL;
+    else if (backend == "vulkan" || backend == "vk")
+        config.rendering.backend = RenderingBackend::Vulkan;
+    else if (backend == "directx12" || backend == "dx12" || backend == "d3d12")
+        config.rendering.backend = RenderingBackend::DirectX12;
+    else if (backend == "software" || backend == "sw")
+        config.rendering.backend = RenderingBackend::Software;
+}
+
 void initialize_lcs_render_configuration(const std::filesystem::path &executable_directory) {
     std::filesystem::path path;
     if (const char *override_path = std::getenv("PSPRECOMP_CONFIG");
@@ -679,6 +706,8 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
     }
 
     LcsConfiguration loaded = load_lcs_render_configuration(path);
+    // Session override. F10 does not write Rendering.Backend.
+    apply_backend_environment(loaded);
     loaded.initialized = true;
     loaded.executable_directory = executable_directory;
     {
@@ -693,6 +722,7 @@ void initialize_lcs_render_configuration(const std::filesystem::path &executable
         const char *backend_name = "software";
         if (config.rendering.backend == RenderingBackend::DirectX12) backend_name = "directx12";
         else if (config.rendering.backend == RenderingBackend::Vulkan) backend_name = "vulkan";
+        else if (config.rendering.backend == RenderingBackend::OpenGL) backend_name = "opengl";
         set_environment_value("PSPRECOMP_GE_BACKEND", backend_name);
     }
     const InternalResolutionDimensions internal =
@@ -754,6 +784,7 @@ const char *rendering_backend_name(RenderingBackend backend) noexcept {
     case RenderingBackend::Software: return "Software";
     case RenderingBackend::DirectX12: return "DirectX 12";
     case RenderingBackend::Vulkan: return "Vulkan";
+    case RenderingBackend::OpenGL: return "OpenGL";
     }
     return "Unknown";
 }

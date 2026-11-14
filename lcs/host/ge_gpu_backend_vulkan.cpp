@@ -23,6 +23,11 @@
 #include <unordered_map>
 #include <vector>
 
+#define GE_GPU_BACKEND_PREFIX ge_vulkan_
+#define GE_GPU_BACKEND_RENAME
+#include "ge_gpu_backend_rename.hpp"
+#undef GE_GPU_BACKEND_RENAME
+
 namespace lcs {
 namespace {
 
@@ -3442,5 +3447,8 @@ GeGpuBackendReport ge_gpu_backend_report() {
 }
 
 }  // namespace lcs
+
+#define GE_GPU_BACKEND_RENAME_END
+#include "ge_gpu_backend_rename.hpp"
 
 #endif

@@ -16,6 +16,7 @@ RUN apt-get update && \
 				libavcodec-dev \
 				libavformat-dev \
 				libavutil-dev \
+				libgl-dev \
 				libsdl2-compat-dev \
 				libswresample-dev \
 				libswscale-dev \

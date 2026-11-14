@@ -36,6 +36,11 @@
 #include <wrl/client.h>
 #endif
 
+#define GE_GPU_BACKEND_PREFIX ge_dx12_
+#define GE_GPU_BACKEND_RENAME
+#include "ge_gpu_backend_rename.hpp"
+#undef GE_GPU_BACKEND_RENAME
+
 namespace lcs {
 
 #if defined(_WIN32)
@@ -3634,3 +3639,6 @@ GeGpuBackendReport ge_gpu_backend_report() { return {}; }
 #endif
 
 }
+
+#define GE_GPU_BACKEND_RENAME_END
+#include "ge_gpu_backend_rename.hpp"
